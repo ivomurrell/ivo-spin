@@ -7,7 +7,10 @@ const Allocator = std.mem.Allocator;
 
 const Self = @This();
 
+const frames_in_flight = 2;
+
 allocator: Allocator,
+current_frame: u8 = 0,
 instance: c.VkInstance,
 surface: c.VkSurfaceKHR,
 device: c.VkDevice,
@@ -23,10 +26,10 @@ pipeline_layout: c.VkPipelineLayout,
 graphics_pipeline: c.VkPipeline,
 framebuffers: []c.VkFramebuffer,
 command_pool: c.VkCommandPool,
-command_buffer: c.VkCommandBuffer,
-image_available_semaphore: c.VkSemaphore,
-render_finished_semaphore: c.VkSemaphore,
-in_flight_fence: c.VkFence,
+command_buffers: [frames_in_flight]c.VkCommandBuffer,
+image_available_semaphores: [frames_in_flight]c.VkSemaphore,
+render_finished_semaphores: [frames_in_flight]c.VkSemaphore,
+in_flight_fences: [frames_in_flight]c.VkFence,
 
 pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
     const instance = try initInstance(allocator);
@@ -111,13 +114,19 @@ pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
     const command_pool = try initCommandPool(device, queue_family_indices);
     errdefer c.vkDestroyCommandPool(device, command_pool, null);
 
-    const command_buffer = try initCommandBuffer(device, command_pool);
+    const command_buffers = try initCommandBuffers(device, command_pool);
 
     const synchronisation_objects = try initSynchronisation(device);
     errdefer {
-        c.vkDestroySemaphore(device, synchronisation_objects.image_available_semaphore, null);
-        c.vkDestroySemaphore(device, synchronisation_objects.render_finished_semaphore, null);
-        c.vkDestroyFence(device, synchronisation_objects.in_flight_fence, null);
+        for (synchronisation_objects.image_available_semaphores) |image_available_semaphore| {
+            c.vkDestroySemaphore(device, image_available_semaphore, null);
+        }
+        for (synchronisation_objects.render_finished_semaphores) |render_finished_semaphore| {
+            c.vkDestroySemaphore(device, render_finished_semaphore, null);
+        }
+        for (synchronisation_objects.in_flight_fences) |in_flight_fence| {
+            c.vkDestroyFence(device, in_flight_fence, null);
+        }
     }
 
     return Self{
@@ -137,10 +146,10 @@ pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
         .graphics_pipeline = graphics_pipeline,
         .framebuffers = framebuffers,
         .command_pool = command_pool,
-        .command_buffer = command_buffer,
-        .image_available_semaphore = synchronisation_objects.image_available_semaphore,
-        .render_finished_semaphore = synchronisation_objects.render_finished_semaphore,
-        .in_flight_fence = synchronisation_objects.in_flight_fence,
+        .command_buffers = command_buffers,
+        .image_available_semaphores = synchronisation_objects.image_available_semaphores,
+        .render_finished_semaphores = synchronisation_objects.render_finished_semaphores,
+        .in_flight_fences = synchronisation_objects.in_flight_fences,
     };
 }
 
@@ -150,9 +159,15 @@ pub fn deinit(self: Self) void {
         "couldn't wait for device to be finished",
     ) catch {};
 
-    c.vkDestroySemaphore(self.device, self.image_available_semaphore, null);
-    c.vkDestroySemaphore(self.device, self.render_finished_semaphore, null);
-    c.vkDestroyFence(self.device, self.in_flight_fence, null);
+    for (self.image_available_semaphores) |image_available_semaphore| {
+        c.vkDestroySemaphore(self.device, image_available_semaphore, null);
+    }
+    for (self.render_finished_semaphores) |render_finished_semaphore| {
+        c.vkDestroySemaphore(self.device, render_finished_semaphore, null);
+    }
+    for (self.in_flight_fences) |in_flight_fence| {
+        c.vkDestroyFence(self.device, in_flight_fence, null);
+    }
     c.vkDestroyCommandPool(self.device, self.command_pool, null);
     for (self.framebuffers) |framebuffer| {
         c.vkDestroyFramebuffer(self.device, framebuffer, null);
@@ -681,25 +696,28 @@ fn initCommandPool(device: c.VkDevice, queue_family_indices: QueueFamilyIndices)
     return command_pool;
 }
 
-fn initCommandBuffer(device: c.VkDevice, command_pool: c.VkCommandPool) !c.VkCommandBuffer {
+fn initCommandBuffers(
+    device: c.VkDevice,
+    command_pool: c.VkCommandPool,
+) ![frames_in_flight]c.VkCommandBuffer {
     const allocate_info = c.VkCommandBufferAllocateInfo{
         .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .commandPool = command_pool,
         .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = 1,
+        .commandBufferCount = frames_in_flight,
     };
-    var command_buffer: c.VkCommandBuffer = undefined;
+    var command_buffers = [_]c.VkCommandBuffer{undefined} ** frames_in_flight;
     try wrapVulkanResult(
-        c.vkAllocateCommandBuffers(device, &allocate_info, &command_buffer),
+        c.vkAllocateCommandBuffers(device, &allocate_info, &command_buffers),
         "failed to allocate command buffer",
     );
-    return command_buffer;
+    return command_buffers;
 }
 
 const SynchronisationObjects = struct {
-    image_available_semaphore: c.VkSemaphore,
-    render_finished_semaphore: c.VkSemaphore,
-    in_flight_fence: c.VkFence,
+    image_available_semaphores: [frames_in_flight]c.VkSemaphore,
+    render_finished_semaphores: [frames_in_flight]c.VkSemaphore,
+    in_flight_fences: [frames_in_flight]c.VkFence,
 };
 
 fn initSynchronisation(device: c.VkDevice) !SynchronisationObjects {
@@ -711,40 +729,67 @@ fn initSynchronisation(device: c.VkDevice) !SynchronisationObjects {
         .flags = c.VK_FENCE_CREATE_SIGNALED_BIT,
     };
 
-    var image_available_semaphore: c.VkSemaphore = undefined;
-    try wrapVulkanResult(
-        c.vkCreateSemaphore(device, &semaphore_create_info, null, &image_available_semaphore),
-        "failed to create semaphore",
-    );
-    errdefer c.vkDestroySemaphore(device, image_available_semaphore, null);
+    var ias_created: usize = 0;
+    var image_available_semaphores = [_]c.VkSemaphore{undefined} ** frames_in_flight;
+    for (&image_available_semaphores) |*image_available_semaphore| {
+        try wrapVulkanResult(
+            c.vkCreateSemaphore(device, &semaphore_create_info, null, image_available_semaphore),
+            "failed to create semaphore",
+        );
+        ias_created += 1;
+    }
+    errdefer {
+        for (image_available_semaphores[0..ias_created]) |image_available_semaphore| {
+            c.vkDestroySemaphore(device, image_available_semaphore, null);
+        }
+    }
 
-    var render_finished_semaphore: c.VkSemaphore = undefined;
-    try wrapVulkanResult(
-        c.vkCreateSemaphore(device, &semaphore_create_info, null, &render_finished_semaphore),
-        "failed to create semaphore",
-    );
-    errdefer c.vkDestroySemaphore(device, image_available_semaphore, null);
+    var rfs_created: usize = 0;
+    var render_finished_semaphores = [_]c.VkSemaphore{undefined} ** frames_in_flight;
+    for (&render_finished_semaphores) |*render_finished_semaphore| {
+        try wrapVulkanResult(
+            c.vkCreateSemaphore(device, &semaphore_create_info, null, render_finished_semaphore),
+            "failed to create semaphore",
+        );
+        rfs_created += 1;
+    }
+    errdefer {
+        for (render_finished_semaphores[0..rfs_created]) |render_finished_semaphore| {
+            c.vkDestroySemaphore(device, render_finished_semaphore, null);
+        }
+    }
 
-    var in_flight_fence: c.VkFence = undefined;
-    try wrapVulkanResult(
-        c.vkCreateFence(device, &fence_create_info, null, &in_flight_fence),
-        "failed to create fence",
-    );
+    var iff_created: usize = 0;
+    var in_flight_fences = [_]c.VkFence{undefined} ** frames_in_flight;
+    for (&in_flight_fences) |*in_flight_fence| {
+        try wrapVulkanResult(
+            c.vkCreateFence(device, &fence_create_info, null, in_flight_fence),
+            "failed to create fence",
+        );
+        iff_created += 1;
+    }
+    errdefer {
+        for (in_flight_fences[0..iff_created]) |in_flight_fence| {
+            c.vkDestroyFence(device, in_flight_fence, null);
+        }
+    }
 
     return .{
-        .image_available_semaphore = image_available_semaphore,
-        .render_finished_semaphore = render_finished_semaphore,
-        .in_flight_fence = in_flight_fence,
+        .image_available_semaphores = image_available_semaphores,
+        .render_finished_semaphores = render_finished_semaphores,
+        .in_flight_fences = in_flight_fences,
     };
 }
 
 fn recordCommandBuffer(self: *Self, framebuffer: c.VkFramebuffer) !void {
+    const command_buffer = self.command_buffers[self.current_frame];
+
     const begin_info = c.VkCommandBufferBeginInfo{
         .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .flags = 0,
     };
     try wrapVulkanResult(
-        c.vkBeginCommandBuffer(self.command_buffer, &begin_info),
+        c.vkBeginCommandBuffer(command_buffer, &begin_info),
         "failed to beging recording command buffer",
     );
 
@@ -756,30 +801,33 @@ fn recordCommandBuffer(self: *Self, framebuffer: c.VkFramebuffer) !void {
         .clearValueCount = 1,
         .pClearValues = &c.VkClearValue{ .color = .{ .float32 = [_]f32{ 0.0, 0.0, 0.0, 1.0 } } },
     };
-    c.vkCmdBeginRenderPass(self.command_buffer, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
+    c.vkCmdBeginRenderPass(command_buffer, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
 
     c.vkCmdBindPipeline(
-        self.command_buffer,
+        command_buffer,
         c.VK_PIPELINE_BIND_POINT_GRAPHICS,
         self.graphics_pipeline,
     );
 
-    c.vkCmdDraw(self.command_buffer, 3, 1, 0, 0);
+    c.vkCmdDraw(command_buffer, 3, 1, 0, 0);
 
-    c.vkCmdEndRenderPass(self.command_buffer);
-    try wrapVulkanResult(
-        c.vkEndCommandBuffer(self.command_buffer),
-        "failed to record command buffer",
-    );
+    c.vkCmdEndRenderPass(command_buffer);
+    try wrapVulkanResult(c.vkEndCommandBuffer(command_buffer), "failed to record command buffer");
 }
 
 pub fn drawFrame(self: *Self) !void {
     try wrapVulkanResult(
-        c.vkWaitForFences(self.device, 1, &self.in_flight_fence, c.VK_TRUE, std.math.maxInt(u64)),
+        c.vkWaitForFences(
+            self.device,
+            1,
+            &self.in_flight_fences[self.current_frame],
+            c.VK_TRUE,
+            std.math.maxInt(u64),
+        ),
         "failed to wait for in-flight fence",
     );
     try wrapVulkanResult(
-        c.vkResetFences(self.device, 1, &self.in_flight_fence),
+        c.vkResetFences(self.device, 1, &self.in_flight_fences[self.current_frame]),
         "failed to reset in-flight fence",
     );
 
@@ -788,13 +836,13 @@ pub fn drawFrame(self: *Self) !void {
         self.device,
         self.swapchain,
         std.math.maxInt(u64),
-        self.image_available_semaphore,
+        self.image_available_semaphores[self.current_frame],
         null,
         &image_index,
     );
 
     try wrapVulkanResult(
-        c.vkResetCommandBuffer(self.command_buffer, 0),
+        c.vkResetCommandBuffer(self.command_buffers[self.current_frame], 0),
         "failed to reset command buffer",
     );
     try self.recordCommandBuffer(self.framebuffers[image_index]);
@@ -802,25 +850,32 @@ pub fn drawFrame(self: *Self) !void {
     const submit_info = c.VkSubmitInfo{
         .sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &self.image_available_semaphore,
+        .pWaitSemaphores = &self.image_available_semaphores[self.current_frame],
         .pWaitDstStageMask = &@intCast(c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT),
         .commandBufferCount = 1,
-        .pCommandBuffers = &self.command_buffer,
+        .pCommandBuffers = &self.command_buffers[self.current_frame],
         .signalSemaphoreCount = 1,
-        .pSignalSemaphores = &self.render_finished_semaphore,
+        .pSignalSemaphores = &self.render_finished_semaphores[self.current_frame],
     };
     try wrapVulkanResult(
-        c.vkQueueSubmit(self.graphics_queue, 1, &submit_info, self.in_flight_fence),
+        c.vkQueueSubmit(
+            self.graphics_queue,
+            1,
+            &submit_info,
+            self.in_flight_fences[self.current_frame],
+        ),
         "failed to submit draw command buffer",
     );
 
     const present_info = c.VkPresentInfoKHR{
         .sType = c.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &self.render_finished_semaphore,
+        .pWaitSemaphores = &self.render_finished_semaphores[self.current_frame],
         .swapchainCount = 1,
         .pSwapchains = &self.swapchain,
         .pImageIndices = &image_index,
     };
     _ = c.vkQueuePresentKHR(self.present_queue, &present_info);
+
+    self.current_frame = (self.current_frame + 1) % frames_in_flight;
 }
