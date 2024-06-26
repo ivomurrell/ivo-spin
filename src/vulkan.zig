@@ -26,6 +26,7 @@ pipeline_layout: c.VkPipelineLayout,
 graphics_pipeline: c.VkPipeline,
 framebuffers: []c.VkFramebuffer,
 command_pool: c.VkCommandPool,
+vertex_buffer: VertexBuffer,
 command_buffers: [frames_in_flight]c.VkCommandBuffer,
 image_available_semaphores: [frames_in_flight]c.VkSemaphore,
 render_finished_semaphores: [frames_in_flight]c.VkSemaphore,
@@ -114,6 +115,14 @@ pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
     const command_pool = try initCommandPool(device, queue_family_indices);
     errdefer c.vkDestroyCommandPool(device, command_pool, null);
 
+    const vertex_buffer = try initVertexBuffer(
+        device,
+        physical_device,
+        command_pool,
+        graphics_queue,
+    );
+    errdefer vertex_buffer.deinit();
+
     const command_buffers = try initCommandBuffers(device, command_pool);
 
     const synchronisation_objects = try initSynchronisation(device);
@@ -146,6 +155,7 @@ pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
         .graphics_pipeline = graphics_pipeline,
         .framebuffers = framebuffers,
         .command_pool = command_pool,
+        .vertex_buffer = vertex_buffer,
         .command_buffers = command_buffers,
         .image_available_semaphores = synchronisation_objects.image_available_semaphores,
         .render_finished_semaphores = synchronisation_objects.render_finished_semaphores,
@@ -168,6 +178,7 @@ pub fn deinit(self: Self) void {
     for (self.in_flight_fences) |in_flight_fence| {
         c.vkDestroyFence(self.device, in_flight_fence, null);
     }
+    self.vertex_buffer.deinit();
     c.vkDestroyCommandPool(self.device, self.command_pool, null);
     for (self.framebuffers) |framebuffer| {
         c.vkDestroyFramebuffer(self.device, framebuffer, null);
@@ -557,11 +568,16 @@ fn initGraphicsPipeline(
         frag_stage_create_info,
     };
 
+    const vertex_binding_description = Vertex.bindingDescription();
+    const vertex_attribute_descriptions = Vertex.attributeDescriptions();
     const vertex_input_info = c.VkPipelineVertexInputStateCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        .vertexBindingDescriptionCount = 0,
-        .vertexAttributeDescriptionCount = 0,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &vertex_binding_description,
+        .vertexAttributeDescriptionCount = vertex_attribute_descriptions.len,
+        .pVertexAttributeDescriptions = &vertex_attribute_descriptions,
     };
+
     const input_assembly_info = c.VkPipelineInputAssemblyStateCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .topology = c.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
@@ -696,6 +712,26 @@ fn initCommandPool(device: c.VkDevice, queue_family_indices: QueueFamilyIndices)
     return command_pool;
 }
 
+fn initVertexBuffer(
+    device: c.VkDevice,
+    physical_device: c.VkPhysicalDevice,
+    command_pool: c.VkCommandPool,
+    graphics_queue: c.VkQueue,
+) !VertexBuffer {
+    const vertices = [_]Vertex{ .{
+        .position = [_]f32{ 0.0, -0.5 },
+        .colour = [_]f32{ 1.0, 0.0, 0.0 },
+    }, .{
+        .position = [_]f32{ 0.5, 0.5 },
+        .colour = [_]f32{ 0.0, 1.0, 0.0 },
+    }, .{
+        .position = [_]f32{ -0.5, 0.5 },
+        .colour = [_]f32{ 0.0, 0.0, 1.0 },
+    } };
+
+    return VertexBuffer.init(&vertices, device, physical_device, command_pool, graphics_queue);
+}
+
 fn initCommandBuffers(
     device: c.VkDevice,
     command_pool: c.VkCommandPool,
@@ -808,8 +844,15 @@ fn recordCommandBuffer(self: *Self, framebuffer: c.VkFramebuffer) !void {
         c.VK_PIPELINE_BIND_POINT_GRAPHICS,
         self.graphics_pipeline,
     );
+    c.vkCmdBindVertexBuffers(
+        command_buffer,
+        0,
+        1,
+        &self.vertex_buffer.handle.handle,
+        &@as(u64, 0),
+    );
 
-    c.vkCmdDraw(command_buffer, 3, 1, 0, 0);
+    c.vkCmdDraw(command_buffer, @intCast(self.vertex_buffer.vertices.len), 1, 0, 0);
 
     c.vkCmdEndRenderPass(command_buffer);
     try wrapVulkanResult(c.vkEndCommandBuffer(command_buffer), "failed to record command buffer");
@@ -879,3 +922,221 @@ pub fn drawFrame(self: *Self) !void {
 
     self.current_frame = (self.current_frame + 1) % frames_in_flight;
 }
+
+pub const Vertex = struct {
+    position: @Vector(2, f32),
+    colour: @Vector(3, f32),
+
+    pub fn bindingDescription() c.VkVertexInputBindingDescription {
+        return .{
+            .binding = 0,
+            .stride = @sizeOf(Vertex),
+            .inputRate = c.VK_VERTEX_INPUT_RATE_VERTEX,
+        };
+    }
+
+    pub fn attributeDescriptions() [2]c.VkVertexInputAttributeDescription {
+        return [_]c.VkVertexInputAttributeDescription{
+            .{
+                .binding = 0,
+                .location = 0,
+                .format = c.VK_FORMAT_R32G32_SFLOAT,
+                .offset = @offsetOf(Vertex, "position"),
+            },
+            .{
+                .binding = 0,
+                .location = 1,
+                .format = c.VK_FORMAT_R32G32B32_SFLOAT,
+                .offset = @offsetOf(Vertex, "colour"),
+            },
+        };
+    }
+};
+
+pub const Buffer = struct {
+    device: c.VkDevice,
+    handle: c.VkBuffer,
+    memory: c.VkDeviceMemory,
+
+    pub fn init(
+        device: c.VkDevice,
+        physical_device: c.VkPhysicalDevice,
+        buffer_size: u64,
+        usage_flags: u32,
+        required_prop_flags: u32,
+    ) !Buffer {
+        const buffer_create_info = c.VkBufferCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size = buffer_size,
+            .usage = usage_flags,
+            .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+        };
+        var buffer: c.VkBuffer = undefined;
+        try wrapVulkanResult(
+            c.vkCreateBuffer(device, &buffer_create_info, null, &buffer),
+            "failed to create vertex buffer",
+        );
+        errdefer c.vkDestroyBuffer(device, buffer, null);
+
+        var mem_reqs: c.VkMemoryRequirements = undefined;
+        c.vkGetBufferMemoryRequirements(device, buffer, &mem_reqs);
+        const memory_type_index =
+            findMemoryTypeIndex(
+            mem_reqs.memoryTypeBits,
+            required_prop_flags,
+            physical_device,
+        ) orelse return error.VulkanInitFailed;
+
+        const allocate_info = c.VkMemoryAllocateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .allocationSize = mem_reqs.size,
+            .memoryTypeIndex = memory_type_index,
+        };
+        var buffer_memory: c.VkDeviceMemory = undefined;
+        try wrapVulkanResult(
+            c.vkAllocateMemory(device, &allocate_info, null, &buffer_memory),
+            "failed to allocate vertex buffer memory",
+        );
+        errdefer c.vkFreeMemory(device, buffer_memory, null);
+
+        try wrapVulkanResult(
+            c.vkBindBufferMemory(device, buffer, buffer_memory, 0),
+            "failed to bind vertx buffer memory",
+        );
+
+        return Buffer{
+            .device = device,
+            .handle = buffer,
+            .memory = buffer_memory,
+        };
+    }
+
+    pub fn deinit(self: Buffer) void {
+        c.vkDestroyBuffer(self.device, self.handle, null);
+        c.vkFreeMemory(self.device, self.memory, null);
+    }
+
+    fn findMemoryTypeIndex(
+        required_bits: u32,
+        required_prop_flags: u32,
+        physical_device: c.VkPhysicalDevice,
+    ) ?u32 {
+        var memory_props: c.VkPhysicalDeviceMemoryProperties = undefined;
+        c.vkGetPhysicalDeviceMemoryProperties(physical_device, &memory_props);
+
+        for (
+            memory_props.memoryTypes[0..memory_props.memoryTypeCount],
+            0..,
+        ) |memory_type, memory_type_index| {
+            if ((required_bits & (@as(u32, 1) << @as(u5, @intCast(memory_type_index))) > 0) and
+                ((memory_type.propertyFlags & required_prop_flags) == required_prop_flags))
+            {
+                return @intCast(memory_type_index);
+            }
+        }
+        return null;
+    }
+};
+
+pub const VertexBuffer = struct {
+    vertices: []const Vertex,
+    handle: Buffer,
+
+    pub fn init(
+        vertices: []const Vertex,
+        device: c.VkDevice,
+        physical_device: c.VkPhysicalDevice,
+        command_pool: c.VkCommandPool,
+        graphics_queue: c.VkQueue,
+    ) !VertexBuffer {
+        const buffer_size = @sizeOf(Vertex) * vertices.len;
+
+        const staging_buffer = try Buffer.init(
+            device,
+            physical_device,
+            buffer_size,
+            c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        );
+        defer staging_buffer.deinit();
+
+        var mapped_data: [*]Vertex = undefined;
+        try wrapVulkanResult(
+            c.vkMapMemory(device, staging_buffer.memory, 0, buffer_size, 0, @ptrCast(&mapped_data)),
+            "failed to map vertex buffer memory",
+        );
+        @memcpy(mapped_data, vertices);
+        c.vkUnmapMemory(device, staging_buffer.memory);
+
+        const vertex_buffer = try Buffer.init(
+            device,
+            physical_device,
+            buffer_size,
+            c.VK_IMAGE_USAGE_TRANSFER_DST_BIT | c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        );
+        errdefer vertex_buffer.deinit();
+
+        const allocate_info = c.VkCommandBufferAllocateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandPool = command_pool,
+            .commandBufferCount = 1,
+        };
+
+        var command_buffer: c.VkCommandBuffer = undefined;
+        try wrapVulkanResult(
+            c.vkAllocateCommandBuffers(device, &allocate_info, &command_buffer),
+            "failed to allocate copying command buffer",
+        );
+        defer c.vkFreeCommandBuffers(device, command_pool, 1, &command_buffer);
+
+        const begin_info = c.VkCommandBufferBeginInfo{
+            .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        };
+        try wrapVulkanResult(
+            c.vkBeginCommandBuffer(command_buffer, &begin_info),
+            "failed to begin recording copying command buffer",
+        );
+
+        const copy_region = c.VkBufferCopy{
+            .size = buffer_size,
+        };
+        c.vkCmdCopyBuffer(
+            command_buffer,
+            staging_buffer.handle,
+            vertex_buffer.handle,
+            1,
+            &copy_region,
+        );
+
+        try wrapVulkanResult(
+            c.vkEndCommandBuffer(command_buffer),
+            "failed to end recording copying command buffer",
+        );
+
+        const submit_info = c.VkSubmitInfo{
+            .sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &command_buffer,
+        };
+        try wrapVulkanResult(
+            c.vkQueueSubmit(graphics_queue, 1, &submit_info, null),
+            "failed to submit copying command to queue",
+        );
+        try wrapVulkanResult(
+            c.vkQueueWaitIdle(graphics_queue),
+            "failed to wait for queue to complete",
+        );
+
+        return VertexBuffer{
+            .vertices = vertices,
+            .handle = vertex_buffer,
+        };
+    }
+
+    pub fn deinit(self: VertexBuffer) void {
+        self.handle.deinit();
+    }
+};
