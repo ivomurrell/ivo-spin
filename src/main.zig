@@ -20,7 +20,7 @@ pub fn main() !void {
             if (event.type == c.SDL_EVENT_QUIT) {
                 break :el;
             }
-            try vulkan.drawFrame();
         }
+        try vulkan.drawFrame();
     }
 }
