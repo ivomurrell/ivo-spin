@@ -1,6 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
+
 const c = @import("c.zig");
+const mat = @import("matrix.zig");
 const SDL = @import("sdl.zig");
 
 const Allocator = std.mem.Allocator;
@@ -10,6 +12,7 @@ const Self = @This();
 const frames_in_flight = 2;
 
 allocator: Allocator,
+timer: std.time.Timer,
 current_frame: u8 = 0,
 instance: c.VkInstance,
 surface: c.VkSurfaceKHR,
@@ -22,18 +25,24 @@ swapchain_image_format: c.VkFormat,
 swapchain_extent: c.VkExtent2D,
 swapchain_image_views: []c.VkImageView,
 render_pass: c.VkRenderPass,
+descriptor_set_layout: c.VkDescriptorSetLayout,
 pipeline_layout: c.VkPipelineLayout,
 graphics_pipeline: c.VkPipeline,
 framebuffers: []c.VkFramebuffer,
 command_pool: c.VkCommandPool,
 vertex_buffer: VertexBuffer,
 index_buffer: IndexBuffer,
+uniform_buffers: [frames_in_flight]UBOBuffer,
+descriptor_pool: c.VkDescriptorPool,
+descriptor_sets: [frames_in_flight]c.VkDescriptorSet,
 command_buffers: [frames_in_flight]c.VkCommandBuffer,
 image_available_semaphores: [frames_in_flight]c.VkSemaphore,
 render_finished_semaphores: [frames_in_flight]c.VkSemaphore,
 in_flight_fences: [frames_in_flight]c.VkFence,
 
 pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
+    const timer = try std.time.Timer.start();
+
     const instance = try initInstance(allocator);
     errdefer c.vkDestroyInstance(instance, null);
 
@@ -88,7 +97,10 @@ pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
     const render_pass = try initRenderPass(device, swapchain.image_format);
     errdefer c.vkDestroyRenderPass(device, render_pass, null);
 
-    const pipeline_layout = try initPipelineLayout(device);
+    const descriptor_set_layout = try initDescriptorSetLayout(device);
+    errdefer c.vkDestroyDescriptorSetLayout(device, descriptor_set_layout, null);
+
+    const pipeline_layout = try initPipelineLayout(device, descriptor_set_layout);
     errdefer c.vkDestroyPipelineLayout(device, pipeline_layout, null);
 
     const graphics_pipeline = try initGraphicsPipeline(
@@ -131,6 +143,20 @@ pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
     );
     errdefer index_buffer.deinit();
 
+    const uniform_buffers = try initUniformBuffers(device, physical_device);
+    errdefer for (uniform_buffers) |uniform_buffer| {
+        uniform_buffer.deinit();
+    };
+
+    const descriptor_pool = try initDescriptorPool(device);
+    errdefer c.vkDestroyDescriptorPool(device, descriptor_pool, null);
+    const descriptor_sets = try initDescriptorSets(
+        device,
+        descriptor_pool,
+        descriptor_set_layout,
+        uniform_buffers,
+    );
+
     const command_buffers = try initCommandBuffers(device, command_pool);
 
     const synchronisation_objects = try initSynchronisation(device);
@@ -148,6 +174,7 @@ pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
 
     return Self{
         .allocator = allocator,
+        .timer = timer,
         .instance = instance,
         .surface = surface,
         .device = device,
@@ -160,11 +187,15 @@ pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
         .swapchain_image_views = swapchain_image_views,
         .render_pass = render_pass,
         .pipeline_layout = pipeline_layout,
+        .descriptor_set_layout = descriptor_set_layout,
         .graphics_pipeline = graphics_pipeline,
         .framebuffers = framebuffers,
         .command_pool = command_pool,
         .vertex_buffer = vertex_buffer,
         .index_buffer = index_buffer,
+        .uniform_buffers = uniform_buffers,
+        .descriptor_pool = descriptor_pool,
+        .descriptor_sets = descriptor_sets,
         .command_buffers = command_buffers,
         .image_available_semaphores = synchronisation_objects.image_available_semaphores,
         .render_finished_semaphores = synchronisation_objects.render_finished_semaphores,
@@ -187,6 +218,10 @@ pub fn deinit(self: Self) void {
     for (self.in_flight_fences) |in_flight_fence| {
         c.vkDestroyFence(self.device, in_flight_fence, null);
     }
+    c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
+    for (self.uniform_buffers) |uniform_buffer| {
+        uniform_buffer.deinit();
+    }
     self.index_buffer.deinit();
     self.vertex_buffer.deinit();
     c.vkDestroyCommandPool(self.device, self.command_pool, null);
@@ -196,6 +231,7 @@ pub fn deinit(self: Self) void {
     self.allocator.free(self.framebuffers);
     c.vkDestroyPipeline(self.device, self.graphics_pipeline, null);
     c.vkDestroyPipelineLayout(self.device, self.pipeline_layout, null);
+    c.vkDestroyDescriptorSetLayout(self.device, self.descriptor_set_layout, null);
     c.vkDestroyRenderPass(self.device, self.render_pass, null);
     for (self.swapchain_image_views) |image_view| {
         c.vkDestroyImageView(self.device, image_view, null);
@@ -533,9 +569,14 @@ fn initRenderPass(device: c.VkDevice, imageFormat: c.VkFormat) !c.VkRenderPass {
     return render_pass;
 }
 
-fn initPipelineLayout(device: c.VkDevice) !c.VkPipelineLayout {
+fn initPipelineLayout(
+    device: c.VkDevice,
+    descriptor_set_layout: c.VkDescriptorSetLayout,
+) !c.VkPipelineLayout {
     const create_info = c.VkPipelineLayoutCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1,
+        .pSetLayouts = &descriptor_set_layout,
     };
     var pipeline_layout: c.VkPipelineLayout = undefined;
     try wrapVulkanResult(c.vkCreatePipelineLayout(
@@ -545,6 +586,28 @@ fn initPipelineLayout(device: c.VkDevice) !c.VkPipelineLayout {
         &pipeline_layout,
     ), "failed to create pipeline layout");
     return pipeline_layout;
+}
+
+fn initDescriptorSetLayout(device: c.VkDevice) !c.VkDescriptorSetLayout {
+    const ubo_layout_binding = c.VkDescriptorSetLayoutBinding{
+        .binding = 0,
+        .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .descriptorCount = 1,
+        .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT,
+    };
+
+    const create_info = c.VkDescriptorSetLayoutCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1,
+        .pBindings = &ubo_layout_binding,
+    };
+    var descriptor_set_layout: c.VkDescriptorSetLayout = undefined;
+    try wrapVulkanResult(
+        c.vkCreateDescriptorSetLayout(device, &create_info, null, &descriptor_set_layout),
+        "failed to create descriptor set layout",
+    );
+
+    return descriptor_set_layout;
 }
 
 fn initGraphicsPipeline(
@@ -729,17 +792,29 @@ fn initVertexBuffer(
     graphics_queue: c.VkQueue,
 ) !VertexBuffer {
     const vertices = [_]Vertex{ .{
-        .position = [_]f32{ -0.5, -0.5 },
+        .position = [_]f32{ -0.5, -0.5, 0.5 },
         .colour = [_]f32{ 1.0, 0.0, 0.0 },
     }, .{
-        .position = [_]f32{ 0.5, -0.5 },
+        .position = [_]f32{ 0.5, -0.5, 0.5 },
         .colour = [_]f32{ 0.0, 1.0, 0.0 },
     }, .{
-        .position = [_]f32{ 0.5, 0.5 },
+        .position = [_]f32{ 0.5, 0.5, 0.5 },
         .colour = [_]f32{ 0.0, 0.0, 1.0 },
     }, .{
-        .position = [_]f32{ -0.5, 0.5 },
+        .position = [_]f32{ -0.5, 0.5, 0.5 },
         .colour = [_]f32{ 1.0, 1.0, 1.0 },
+    }, .{
+        .position = [_]f32{ -0.5, -0.5, -0.5 },
+        .colour = [_]f32{ 1.0, 1.0, 0.0 },
+    }, .{
+        .position = [_]f32{ 0.5, -0.5, -0.5 },
+        .colour = [_]f32{ 0.0, 1.0, 1.0 },
+    }, .{
+        .position = [_]f32{ 0.5, 0.5, -0.5 },
+        .colour = [_]f32{ 1.0, 0.0, 1.0 },
+    }, .{
+        .position = [_]f32{ -0.5, 0.5, -0.5 },
+        .colour = [_]f32{ 0.5, 0.5, 1.0 },
     } };
 
     return VertexBuffer.init(&vertices, device, physical_device, command_pool, graphics_queue);
@@ -751,9 +826,89 @@ fn initIndexBuffer(
     command_pool: c.VkCommandPool,
     graphics_queue: c.VkQueue,
 ) !IndexBuffer {
-    const indices = [_]u16{ 0, 1, 2, 2, 3, 0 };
+    const front_face = [_]u16{ 0, 1, 2, 2, 3, 0 };
+    const right_face = [_]u16{ 1, 5, 6, 6, 2, 1 };
+    const top_face = [_]u16{ 4, 5, 1, 1, 0, 4 };
+    const left_face = [_]u16{ 4, 0, 3, 3, 7, 4 };
+    const bottom_face = [_]u16{ 3, 2, 6, 6, 7, 3 };
+    const back_face = [_]u16{ 5, 4, 7, 7, 6, 5 };
+    const indices = front_face ++ right_face ++ top_face ++ left_face ++ bottom_face ++ back_face;
 
     return IndexBuffer.init(&indices, device, physical_device, command_pool, graphics_queue);
+}
+
+fn initUniformBuffers(
+    device: c.VkDevice,
+    physical_device: c.VkPhysicalDevice,
+) ![frames_in_flight]UBOBuffer {
+    var uniform_buffers = [_]UBOBuffer{undefined} ** frames_in_flight;
+    var num_created: usize = 0;
+    errdefer for (uniform_buffers[0..num_created]) |uniform_buffer| {
+        uniform_buffer.deinit();
+    };
+    for (&uniform_buffers) |*uniform_buffer| {
+        uniform_buffer.* = try UBOBuffer.init(device, physical_device);
+        num_created += 1;
+    }
+    return uniform_buffers;
+}
+
+fn initDescriptorPool(device: c.VkDevice) !c.VkDescriptorPool {
+    const pool_size = c.VkDescriptorPoolSize{
+        .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .descriptorCount = frames_in_flight,
+    };
+    const create_info = c.VkDescriptorPoolCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .poolSizeCount = 1,
+        .pPoolSizes = &pool_size,
+        .maxSets = frames_in_flight,
+    };
+    var descriptor_pool: c.VkDescriptorPool = undefined;
+    try wrapVulkanResult(
+        c.vkCreateDescriptorPool(device, &create_info, null, &descriptor_pool),
+        "Failed to create descriptor pool",
+    );
+    return descriptor_pool;
+}
+
+fn initDescriptorSets(
+    device: c.VkDevice,
+    descriptor_pool: c.VkDescriptorPool,
+    descriptor_set_layout: c.VkDescriptorSetLayout,
+    uniform_buffers: [frames_in_flight]UBOBuffer,
+) ![frames_in_flight]c.VkDescriptorSet {
+    const allocate_info = c.VkDescriptorSetAllocateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = descriptor_pool,
+        .descriptorSetCount = frames_in_flight,
+        .pSetLayouts = &[_]c.VkDescriptorSetLayout{descriptor_set_layout} ** frames_in_flight,
+    };
+    var descriptor_sets = [_]c.VkDescriptorSet{undefined} ** frames_in_flight;
+    try wrapVulkanResult(
+        c.vkAllocateDescriptorSets(device, &allocate_info, &descriptor_sets),
+        "failed to allocate descriptor sets",
+    );
+
+    for (descriptor_sets, uniform_buffers) |descriptor_set, uniform_buffer| {
+        const buffer_info = c.VkDescriptorBufferInfo{
+            .buffer = uniform_buffer.handle.handle,
+            .offset = 0,
+            .range = c.VK_WHOLE_SIZE,
+        };
+        const descriptor_write = c.VkWriteDescriptorSet{
+            .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = descriptor_set,
+            .dstBinding = 0,
+            .dstArrayElement = 0,
+            .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .pBufferInfo = &buffer_info,
+        };
+        c.vkUpdateDescriptorSets(device, 1, &descriptor_write, 0, null);
+    }
+
+    return descriptor_sets;
 }
 
 fn initCommandBuffers(
@@ -881,6 +1036,16 @@ fn recordCommandBuffer(self: *Self, framebuffer: c.VkFramebuffer) !void {
         0,
         c.VK_INDEX_TYPE_UINT16,
     );
+    c.vkCmdBindDescriptorSets(
+        command_buffer,
+        c.VK_PIPELINE_BIND_POINT_GRAPHICS,
+        self.pipeline_layout,
+        0,
+        1,
+        &self.descriptor_sets[self.current_frame],
+        0,
+        null,
+    );
 
     c.vkCmdDrawIndexed(command_buffer, @intCast(self.index_buffer.data.len), 1, 0, 0, 0);
 
@@ -913,6 +1078,8 @@ pub fn drawFrame(self: *Self) !void {
         null,
         &image_index,
     );
+
+    self.updateUniformBuffer();
 
     try wrapVulkanResult(
         c.vkResetCommandBuffer(self.command_buffers[self.current_frame], 0),
@@ -954,7 +1121,7 @@ pub fn drawFrame(self: *Self) !void {
 }
 
 pub const Vertex = struct {
-    position: @Vector(2, f32),
+    position: @Vector(3, f32),
     colour: @Vector(3, f32),
 
     pub fn bindingDescription() c.VkVertexInputBindingDescription {
@@ -970,7 +1137,7 @@ pub const Vertex = struct {
             .{
                 .binding = 0,
                 .location = 0,
-                .format = c.VK_FORMAT_R32G32_SFLOAT,
+                .format = c.VK_FORMAT_R32G32B32_SFLOAT,
                 .offset = @offsetOf(Vertex, "position"),
             },
             .{
@@ -1068,7 +1235,7 @@ pub const Buffer = struct {
     }
 };
 
-fn DataBuffer(comptime T: type, buffer_type: u32) type {
+fn StagedBuffer(comptime T: type, buffer_type: u32) type {
     return struct {
         const SelfBuffer = @This();
         data: []const T,
@@ -1094,7 +1261,14 @@ fn DataBuffer(comptime T: type, buffer_type: u32) type {
 
             var mapped_data: [*]T = undefined;
             try wrapVulkanResult(
-                c.vkMapMemory(device, staging_buffer.memory, 0, buffer_size, 0, @ptrCast(&mapped_data)),
+                c.vkMapMemory(
+                    device,
+                    staging_buffer.memory,
+                    0,
+                    buffer_size,
+                    0,
+                    @ptrCast(&mapped_data),
+                ),
                 "failed to map vertex buffer memory",
             );
             @memcpy(mapped_data, data);
@@ -1174,5 +1348,60 @@ fn DataBuffer(comptime T: type, buffer_type: u32) type {
     };
 }
 
-pub const VertexBuffer = DataBuffer(Vertex, c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-pub const IndexBuffer = DataBuffer(u16, c.VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+pub const VertexBuffer = StagedBuffer(Vertex, c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+pub const IndexBuffer = StagedBuffer(u16, c.VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+
+fn UniformBuffer(comptime T: type) type {
+    return struct {
+        const SelfBuffer = @This();
+        handle: Buffer,
+        mapped_memory: *T,
+
+        pub fn init(device: c.VkDevice, physical_device: c.VkPhysicalDevice) !SelfBuffer {
+            const buffer_size = @sizeOf(T);
+            const buffer = try Buffer.init(
+                device,
+                physical_device,
+                buffer_size,
+                c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            );
+            errdefer buffer.deinit();
+
+            var mapped_memory: *T = undefined;
+            try wrapVulkanResult(
+                c.vkMapMemory(device, buffer.memory, 0, buffer_size, 0, @ptrCast(&mapped_memory)),
+                "failed to map uniform buffer memory",
+            );
+
+            return SelfBuffer{
+                .handle = buffer,
+                .mapped_memory = mapped_memory,
+            };
+        }
+
+        pub fn deinit(self: SelfBuffer) void {
+            self.handle.deinit();
+        }
+    };
+}
+pub const UniformBufferObject = extern struct {
+    model: mat.Mat4,
+    view: mat.Mat4,
+    projection: mat.Mat4,
+};
+pub const UBOBuffer = UniformBuffer(UniformBufferObject);
+
+fn updateUniformBuffer(self: *Self) void {
+    const time = self.timer.read();
+    const time_s = @as(f32, @floatFromInt(time)) / 1_000_000_000;
+    const angle = std.math.degreesToRadians(time_s * 20);
+    const aspect_ratio = @as(f32, @floatFromInt(self.swapchain_extent.width)) /
+        @as(f32, @floatFromInt(self.swapchain_extent.height));
+
+    self.uniform_buffers[self.current_frame].mapped_memory.* = UniformBufferObject{
+        .model = mat.Mat4.rotate(angle, angle, angle),
+        .view = mat.Mat4.lookAt(.{ @sin(angle), 0, -2.5 }, .{ 0, 0, 0 }, .{ 0, -1, 0 }),
+        .projection = mat.Mat4.perspective(std.math.degreesToRadians(45), aspect_ratio, 0.1, 10),
+    };
+}
