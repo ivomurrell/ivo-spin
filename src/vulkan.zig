@@ -1401,7 +1401,7 @@ fn updateUniformBuffer(self: *Self) void {
 
     self.uniform_buffers[self.current_frame].mapped_memory.* = UniformBufferObject{
         .model = mat.Mat4.rotate(angle, angle, angle),
-        .view = mat.Mat4.lookAt(.{ @sin(angle), 0, -2.5 }, .{ 0, 0, 0 }, .{ 0, -1, 0 }),
+        .view = mat.Mat4.lookAt(.{ 0, 0, -2.5 }, .{ 0, 0, 0 }, .{ 0, -1, 0 }),
         .projection = mat.Mat4.perspective(std.math.degreesToRadians(45), aspect_ratio, 0.1, 10),
     };
 }
