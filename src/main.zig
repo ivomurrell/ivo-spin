@@ -16,7 +16,7 @@ pub fn main() !void {
 
     el: while (true) {
         var event = c.SDL_Event{ .type = 0 };
-        while (c.SDL_PollEvent(&event) != 0) {
+        while (c.SDL_PollEvent(&event)) {
             if (event.type == c.SDL_EVENT_QUIT) {
                 break :el;
             }

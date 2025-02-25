@@ -6,7 +6,7 @@ const Self = @This();
 window: *c.SDL_Window,
 
 pub fn init() !Self {
-    if (c.SDL_Init(c.SDL_INIT_VIDEO) < 0) {
+    if (!c.SDL_Init(c.SDL_INIT_VIDEO)) {
         std.log.err(
             "Couldn't initialize SDL: {s}",
             .{c.SDL_GetError()},
@@ -38,7 +38,7 @@ pub fn extensions() []const [*:0]const u8 {
 
 pub fn initVulkanSurface(self: *const Self, instance: c.VkInstance) !c.VkSurfaceKHR {
     var surface: c.VkSurfaceKHR = null;
-    if (c.SDL_Vulkan_CreateSurface(self.window, instance, null, &surface) != c.SDL_TRUE) {
+    if (!c.SDL_Vulkan_CreateSurface(self.window, instance, null, &surface)) {
         return error.SDLInitSurfaceFailed;
     }
     return surface;
