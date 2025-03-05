@@ -24,6 +24,7 @@ swapchain_images: []c.VkImage,
 swapchain_image_format: c.VkFormat,
 swapchain_extent: c.VkExtent2D,
 swapchain_image_views: []c.VkImageView,
+depth_resources: DepthResources,
 render_pass: c.VkRenderPass,
 descriptor_set_layout: c.VkDescriptorSetLayout,
 pipeline_layout: c.VkPipelineLayout,
@@ -86,6 +87,7 @@ pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
         device,
         swapchain.images,
         swapchain.image_format,
+        c.VK_IMAGE_ASPECT_COLOR_BIT,
     );
     errdefer {
         for (swapchain_image_views) |image_view| {
@@ -94,7 +96,21 @@ pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
         allocator.free(swapchain_image_views);
     }
 
-    const render_pass = try initRenderPass(device, swapchain.image_format);
+    const depth_resources = try initDepthResources(
+        device,
+        physical_device,
+        swapchain.image_extent,
+    );
+    errdefer {
+        c.vkDestroyImageView(device, depth_resources.image_view, null);
+        depth_resources.image.deinit();
+    }
+
+    const render_pass = try initRenderPass(
+        device,
+        swapchain.image_format,
+        depth_resources.image.format,
+    );
     errdefer c.vkDestroyRenderPass(device, render_pass, null);
 
     const descriptor_set_layout = try initDescriptorSetLayout(device);
@@ -116,6 +132,7 @@ pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
         device,
         swapchain.image_extent,
         swapchain_image_views,
+        depth_resources.image_view,
         render_pass,
     );
     errdefer {
@@ -186,6 +203,7 @@ pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
         .swapchain_image_format = swapchain.image_format,
         .swapchain_extent = swapchain.image_extent,
         .swapchain_image_views = swapchain_image_views,
+        .depth_resources = depth_resources,
         .render_pass = render_pass,
         .pipeline_layout = pipeline_layout,
         .descriptor_set_layout = descriptor_set_layout,
@@ -226,6 +244,8 @@ pub fn deinit(self: Self) void {
     }
     self.index_buffer.deinit();
     self.vertex_buffer.deinit();
+    c.vkDestroyImageView(self.device, self.depth_resources.image_view, null);
+    self.depth_resources.image.deinit();
     c.vkDestroyCommandPool(self.device, self.command_pool, null);
     for (self.framebuffers) |framebuffer| {
         c.vkDestroyFramebuffer(self.device, framebuffer, null);
@@ -491,7 +511,8 @@ fn initImageViews(
     allocator: Allocator,
     device: c.VkDevice,
     images: []c.VkImage,
-    image_format: c.VkFormat,
+    format: c.VkFormat,
+    aspect_flags: c.VkImageAspectFlags,
 ) ![]c.VkImageView {
     const image_views = try allocator.alloc(c.VkImageView, images.len);
     errdefer allocator.free(image_views);
@@ -500,23 +521,12 @@ fn initImageViews(
     errdefer for (image_views[0..num_created]) |image_view| {
         c.vkDestroyImageView(device, image_view, null);
     };
-    for (images, image_views) |image, *imageView| {
-        var create_info = c.VkImageViewCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-            .image = image,
-            .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
-            .format = image_format,
-            .subresourceRange = c.VkImageSubresourceRange{
-                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-        };
-        try wrapVulkanResult(
-            c.vkCreateImageView(device, &create_info, null, imageView),
-            "failed to create an image view",
+    for (images, image_views) |image, *image_view| {
+        image_view.* = try initImageView(
+            device,
+            image,
+            format,
+            aspect_flags,
         );
         num_created += 1;
     }
@@ -524,9 +534,72 @@ fn initImageViews(
     return image_views;
 }
 
-fn initRenderPass(device: c.VkDevice, imageFormat: c.VkFormat) !c.VkRenderPass {
+fn initImageView(
+    device: c.VkDevice,
+    image: c.VkImage,
+    format: c.VkFormat,
+    aspect_flags: c.VkImageAspectFlags,
+) !c.VkImageView {
+    var create_info = c.VkImageViewCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = image,
+        .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
+        .format = format,
+        .subresourceRange = c.VkImageSubresourceRange{
+            .aspectMask = aspect_flags,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+    var image_view: c.VkImageView = undefined;
+    try wrapVulkanResult(
+        c.vkCreateImageView(device, &create_info, null, &image_view),
+        "failed to create an image view",
+    );
+    return image_view;
+}
+
+const DepthResources = struct {
+    image: DepthImage,
+    image_view: c.VkImageView,
+};
+
+fn initDepthResources(
+    device: c.VkDevice,
+    physical_device: c.VkPhysicalDevice,
+    image_extent: c.VkExtent2D,
+) !DepthResources {
+    const depth_image = try DepthImage.init(
+        device,
+        physical_device,
+        image_extent.width,
+        image_extent.height,
+    );
+    errdefer depth_image.deinit();
+
+    const depth_image_view = try initImageView(
+        device,
+        depth_image.handle,
+        c.VK_FORMAT_D32_SFLOAT_S8_UINT,
+        c.VK_IMAGE_ASPECT_DEPTH_BIT,
+    );
+    errdefer c.vkDestroyImageView(device, depth_image_view, null);
+
+    return .{
+        .image = depth_image,
+        .image_view = depth_image_view,
+    };
+}
+
+fn initRenderPass(
+    device: c.VkDevice,
+    image_format: c.VkFormat,
+    depth_format: c.VkFormat,
+) !c.VkRenderPass {
     const colour_attachment = c.VkAttachmentDescription{
-        .format = imageFormat,
+        .format = image_format,
         .samples = c.VK_SAMPLE_COUNT_1_BIT,
         .loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR,
         .storeOp = c.VK_ATTACHMENT_STORE_OP_STORE,
@@ -540,24 +613,44 @@ fn initRenderPass(device: c.VkDevice, imageFormat: c.VkFormat) !c.VkRenderPass {
         .layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
     };
 
+    const depth_attachment = c.VkAttachmentDescription{
+        .format = depth_format,
+        .samples = c.VK_SAMPLE_COUNT_1_BIT,
+        .loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        .stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
+        .finalLayout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+    };
+    const depth_attachment_ref = c.VkAttachmentReference{
+        .attachment = 1,
+        .layout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+    };
+
     const subpass = c.VkSubpassDescription{
         .pipelineBindPoint = c.VK_PIPELINE_BIND_POINT_GRAPHICS,
         .colorAttachmentCount = 1,
         .pColorAttachments = &colour_attachment_ref,
+        .pDepthStencilAttachment = &depth_attachment_ref,
     };
     const subpass_dependency = c.VkSubpassDependency{
         .srcSubpass = c.VK_SUBPASS_EXTERNAL,
         .dstSubpass = 0,
-        .srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        .srcAccessMask = 0,
-        .dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        .srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        .srcAccessMask = c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        .dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+        .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
     };
 
+    const attachments = [_]c.VkAttachmentDescription{
+        colour_attachment,
+        depth_attachment,
+    };
     const create_info = c.VkRenderPassCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-        .attachmentCount = 1,
-        .pAttachments = &colour_attachment,
+        .attachmentCount = attachments.len,
+        .pAttachments = &attachments,
         .subpassCount = 1,
         .pSubpasses = &subpass,
         .dependencyCount = 1,
@@ -699,6 +792,14 @@ fn initGraphicsPipeline(
             .blendEnable = c.VK_FALSE,
         },
     };
+    const depth_stencil_info = c.VkPipelineDepthStencilStateCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = c.VK_TRUE,
+        .depthWriteEnable = c.VK_TRUE,
+        .depthCompareOp = c.VK_COMPARE_OP_LESS,
+        .depthBoundsTestEnable = c.VK_FALSE,
+        .stencilTestEnable = c.VK_FALSE,
+    };
 
     const create_info = c.VkGraphicsPipelineCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -710,6 +811,7 @@ fn initGraphicsPipeline(
         .pRasterizationState = &rasteriser_state_info,
         .pMultisampleState = &multisample_state_info,
         .pColorBlendState = &colour_blend_state_info,
+        .pDepthStencilState = &depth_stencil_info,
         .layout = pipeline_layout,
         .renderPass = render_pass,
         .subpass = 0,
@@ -745,6 +847,7 @@ fn initFramebuffers(
     device: c.VkDevice,
     image_extent: c.VkExtent2D,
     image_views: []c.VkImageView,
+    depth_image_view: c.VkImageView,
     render_pass: c.VkRenderPass,
 ) ![]c.VkFramebuffer {
     const framebuffers = try allocator.alloc(c.VkFramebuffer, image_views.len);
@@ -754,11 +857,12 @@ fn initFramebuffers(
         c.vkDestroyFramebuffer(device, framebuffer, null);
     };
     for (image_views, framebuffers) |image_view, *framebuffer| {
+        const attachments = [_]c.VkImageView{ image_view, depth_image_view };
         const create_info = c.VkFramebufferCreateInfo{
             .sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
             .renderPass = render_pass,
-            .attachmentCount = 1,
-            .pAttachments = &image_view,
+            .attachmentCount = attachments.len,
+            .pAttachments = &attachments,
             .width = image_extent.width,
             .height = image_extent.height,
             .layers = 1,
@@ -1015,13 +1119,18 @@ fn recordCommandBuffer(self: *Self, framebuffer: c.VkFramebuffer) !void {
         "failed to beging recording command buffer",
     );
 
+    const clear_values = [_]c.VkClearValue{
+        .{ .color = .{ .float32 = [_]f32{ 0.0, 0.0, 0.0, 1.0 } } },
+        .{ .depthStencil = .{ .depth = 1.0, .stencil = 0.0 } },
+    };
+
     const render_pass_info = c.VkRenderPassBeginInfo{
         .sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
         .renderPass = self.render_pass,
         .framebuffer = framebuffer,
         .renderArea = .{ .offset = .{ .x = 0, .y = 0 }, .extent = self.swapchain_extent },
-        .clearValueCount = 1,
-        .pClearValues = &c.VkClearValue{ .color = .{ .float32 = [_]f32{ 0.0, 0.0, 0.0, 1.0 } } },
+        .clearValueCount = clear_values.len,
+        .pClearValues = &clear_values,
     };
     c.vkCmdBeginRenderPass(command_buffer, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
 
@@ -1412,3 +1521,91 @@ fn updateUniformBuffer(self: *Self) void {
         .projection = mat.Mat4.perspective(std.math.degreesToRadians(45), aspect_ratio, 0.1, 10),
     };
 }
+
+fn Image(
+    format: c.VkFormat,
+    tiling: c.VkImageTiling,
+    usage: c.VkImageUsageFlags,
+    mem_properties: c.VkMemoryPropertyFlags,
+) type {
+    return struct {
+        const SelfImage = @This();
+        device: c.VkDevice,
+        handle: c.VkImage,
+        memory: c.VkDeviceMemory,
+        format: c.VkFormat,
+
+        pub fn init(
+            device: c.VkDevice,
+            physical_device: c.VkPhysicalDevice,
+            width: u32,
+            height: u32,
+        ) !SelfImage {
+            const image_create_info = c.VkImageCreateInfo{
+                .sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                .imageType = c.VK_IMAGE_TYPE_2D,
+                .format = format,
+                .extent = c.VkExtent3D{
+                    .width = width,
+                    .height = height,
+                    .depth = 1,
+                },
+                .mipLevels = 1,
+                .arrayLayers = 1,
+                .tiling = tiling,
+                .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
+                .usage = usage,
+                .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+                .samples = c.VK_SAMPLE_COUNT_1_BIT,
+            };
+            var image: c.VkImage = undefined;
+            try wrapVulkanResult(
+                c.vkCreateImage(device, &image_create_info, null, &image),
+                "failed to create image",
+            );
+            errdefer c.vkDestroyImage(device, image, null);
+
+            var mem_reqs: c.VkMemoryRequirements = undefined;
+            c.vkGetImageMemoryRequirements(device, image, &mem_reqs);
+            const memory_type_index = Buffer.findMemoryTypeIndex(
+                mem_reqs.memoryTypeBits,
+                mem_properties,
+                physical_device,
+            ) orelse return error.VulkanInitFailed;
+            const allocate_info = c.VkMemoryAllocateInfo{
+                .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                .allocationSize = mem_reqs.size,
+                .memoryTypeIndex = memory_type_index,
+            };
+            var image_memory: c.VkDeviceMemory = undefined;
+            try wrapVulkanResult(
+                c.vkAllocateMemory(device, &allocate_info, null, &image_memory),
+                "failed to allocate image memory",
+            );
+            errdefer c.vkFreeMemory(device, image_memory, null);
+            try wrapVulkanResult(
+                c.vkBindImageMemory(device, image, image_memory, 0),
+                "failed to bind image memory",
+            );
+
+            return SelfImage{
+                .device = device,
+                .handle = image,
+                .memory = image_memory,
+                .format = format,
+            };
+        }
+
+        pub fn deinit(self: SelfImage) void {
+            c.vkDestroyImage(self.device, self.handle, null);
+            c.vkFreeMemory(self.device, self.memory, null);
+        }
+    };
+}
+
+pub const DepthImage = Image(
+    c.VK_FORMAT_D32_SFLOAT_S8_UINT,
+    c.VK_IMAGE_TILING_OPTIMAL,
+    c.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+    c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+);
