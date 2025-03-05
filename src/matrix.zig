@@ -10,14 +10,12 @@ pub const Mat4 = extern struct {
     z: Vec4,
     t: Vec4,
 
-    pub fn identity() Self {
-        return Self{
-            .x = .{ 1, 0, 0, 0 },
-            .y = .{ 0, 1, 0, 0 },
-            .z = .{ 0, 0, 1, 0 },
-            .t = .{ 0, 0, 0, 1 },
-        };
-    }
+    pub const identity: Self = .{
+        .x = .{ 1, 0, 0, 0 },
+        .y = .{ 0, 1, 0, 0 },
+        .z = .{ 0, 0, 1, 0 },
+        .t = .{ 0, 0, 0, 1 },
+    };
 
     pub fn translate(x: f32, y: f32, z: f32) Self {
         return Self{
@@ -89,7 +87,7 @@ pub const Mat4 = extern struct {
     pub fn transpose(self: Self) Self {
         const T = @typeInfo(Self);
         var transposed: Self = undefined;
-        inline for (T.Struct.fields, 0..) |field, col| {
+        inline for (T.@"struct".fields, 0..) |field, col| {
             @field(transposed, field.name) = .{
                 self.x[col],
                 self.y[col],
@@ -147,7 +145,7 @@ fn expectApproxEqualVec(expected: Vec4, actual: Vec4) !void {
 }
 
 fn expectApproxEqualMatrix(expected: Mat4, actual: Mat4) !void {
-    inline for (@typeInfo(Mat4).Struct.fields) |field| {
+    inline for (@typeInfo(Mat4).@"struct".fields) |field| {
         const expected_row = @field(expected, field.name);
         const actual_row = @field(actual, field.name);
         expectApproxEqualVec(expected_row, actual_row) catch |err| {
@@ -199,7 +197,7 @@ pub fn vertexMult(mat: Mat4, vertex: Vec3) Vec4 {
 }
 
 test "Mat4.translate" {
-    try expectApproxEqualMatrix(Mat4.identity(), Mat4.translate(0, 0, 0));
+    try expectApproxEqualMatrix(Mat4.identity, Mat4.translate(0, 0, 0));
     try expectApproxEqualVec(
         Vec4{ -9, 8, 56, 1 },
         vertexMult(Mat4.translate(-10, 6, 53), .{ 1, 2, 3 }),
@@ -207,7 +205,7 @@ test "Mat4.translate" {
 }
 
 test "Mat4.rotate" {
-    try expectApproxEqualMatrix(Mat4.identity(), Mat4.rotate(0, 0, 0));
+    try expectApproxEqualMatrix(Mat4.identity, Mat4.rotate(0, 0, 0));
     try expectApproxEqualVec(
         Vec4{ 0, -1, 0, 1 },
         vertexMult(

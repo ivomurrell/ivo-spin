@@ -4,7 +4,7 @@ const SDL = @import("sdl.zig");
 const Vulkan = @import("vulkan.zig");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

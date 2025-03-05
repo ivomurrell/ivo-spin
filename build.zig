@@ -21,7 +21,7 @@ pub fn build(b: *std.Build) !void {
     var walker = try shader_dir.walk(b.allocator);
     const allowed_exts = [_][]const u8{ ".vert", ".frag" };
     const Shader = struct { output: std.Build.LazyPath, filename: []const u8 };
-    var shader_outputs = std.ArrayList(Shader).init(b.allocator);
+    var shader_outputs: std.ArrayListUnmanaged(Shader) = .empty;
     while (try walker.next()) |entry| {
         const ext = std.fs.path.extension(entry.basename);
         const should_include_file = for (allowed_exts) |allowed_ext| {
@@ -37,7 +37,7 @@ pub fn build(b: *std.Build) !void {
             shader_compile.addFileArg(b.path(input_path));
             const out_path = b.fmt("{s}.spv", .{ext[1..]});
             const spv_out = shader_compile.addPrefixedOutputFileArg("-o", out_path);
-            try shader_outputs.append(.{ .output = spv_out, .filename = out_path });
+            try shader_outputs.append(b.allocator, .{ .output = spv_out, .filename = out_path });
         }
     }
 
