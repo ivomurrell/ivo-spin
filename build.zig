@@ -41,28 +41,33 @@ pub fn build(b: *std.Build) !void {
         }
     }
 
-    const exe = b.addExecutable(.{
-        .name = "ivo-spin",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    exe.linkSystemLibrary("sdl3");
-    if (target.query.isNative() and target.result.os.tag == .macos) {
-        // the vulkan utility headers aren't declared in a pkg-config file so
-        // we need to add the brew include path
-        exe.addIncludePath(std.Build.LazyPath{ .cwd_relative = "/opt/homebrew/include" });
-        // the vulkan loader can't find the validation layer unless we add its
-        // path to the search paths here
-        exe.addLibraryPath(std.Build.LazyPath{ .cwd_relative = "/opt/homebrew/lib" });
+    var exe_steps: [2]*std.Build.Step.Compile = @splat(undefined);
+    for (&exe_steps) |*exe_step_ref| {
+        const exe_step = b.addExecutable(.{
+            .name = "ivo-spin",
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        exe_step.linkSystemLibrary("sdl3");
+        if (target.query.isNative() and target.result.os.tag == .macos) {
+            // the vulkan utility headers aren't declared in a pkg-config file so
+            // we need to add the brew include path
+            exe_step.addIncludePath(std.Build.LazyPath{ .cwd_relative = "/opt/homebrew/include" });
+            // the vulkan loader can't find the validation layer unless we add its
+            // path to the search paths here
+            exe_step.addLibraryPath(std.Build.LazyPath{ .cwd_relative = "/opt/homebrew/lib" });
+        }
+        exe_step.linkSystemLibrary("vulkan");
+        for (shader_outputs.items) |shader_output| {
+            exe_step.root_module.addAnonymousImport(
+                shader_output.filename,
+                .{ .root_source_file = shader_output.output },
+            );
+        }
+        exe_step_ref.* = exe_step;
     }
-    exe.linkSystemLibrary("vulkan");
-    for (shader_outputs.items) |shader_output| {
-        exe.root_module.addAnonymousImport(
-            shader_output.filename,
-            .{ .root_source_file = shader_output.output },
-        );
-    }
+    const exe, const exe_check = exe_steps;
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
@@ -107,4 +112,7 @@ pub fn build(b: *std.Build) !void {
     // running the unit tests.
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_unit_tests.step);
+
+    const check = b.step("check", "Check if foo compiles");
+    check.dependOn(&exe_check.step);
 }
