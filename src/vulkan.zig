@@ -37,7 +37,7 @@ descriptor_pool: c.VkDescriptorPool,
 descriptor_sets: [frames_in_flight]c.VkDescriptorSet,
 command_buffers: [frames_in_flight]c.VkCommandBuffer,
 image_available_semaphores: [frames_in_flight]c.VkSemaphore,
-render_finished_semaphores: [frames_in_flight]c.VkSemaphore,
+render_finished_semaphores: []c.VkSemaphore,
 in_flight_fences: [frames_in_flight]c.VkFence,
 
 pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
@@ -159,7 +159,7 @@ pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
 
     const command_buffers = try initCommandBuffers(device, command_pool);
 
-    const synchronisation_objects = try initSynchronisation(device);
+    const synchronisation_objects = try initSynchronisation(allocator, device, swapchain.images.len);
     errdefer {
         for (synchronisation_objects.image_available_semaphores) |image_available_semaphore| {
             c.vkDestroySemaphore(device, image_available_semaphore, null);
@@ -167,6 +167,7 @@ pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
         for (synchronisation_objects.render_finished_semaphores) |render_finished_semaphore| {
             c.vkDestroySemaphore(device, render_finished_semaphore, null);
         }
+        allocator.free(synchronisation_objects.render_finished_semaphores);
         for (synchronisation_objects.in_flight_fences) |in_flight_fence| {
             c.vkDestroyFence(device, in_flight_fence, null);
         }
@@ -215,6 +216,7 @@ pub fn deinit(self: Self) void {
     for (self.render_finished_semaphores) |render_finished_semaphore| {
         c.vkDestroySemaphore(self.device, render_finished_semaphore, null);
     }
+    self.allocator.free(self.render_finished_semaphores);
     for (self.in_flight_fences) |in_flight_fence| {
         c.vkDestroyFence(self.device, in_flight_fence, null);
     }
@@ -931,11 +933,15 @@ fn initCommandBuffers(
 
 const SynchronisationObjects = struct {
     image_available_semaphores: [frames_in_flight]c.VkSemaphore,
-    render_finished_semaphores: [frames_in_flight]c.VkSemaphore,
+    render_finished_semaphores: []c.VkSemaphore,
     in_flight_fences: [frames_in_flight]c.VkFence,
 };
 
-fn initSynchronisation(device: c.VkDevice) !SynchronisationObjects {
+fn initSynchronisation(
+    allocator: Allocator,
+    device: c.VkDevice,
+    swapchain_image_count: usize,
+) !SynchronisationObjects {
     const semaphore_create_info = c.VkSemaphoreCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
     };
@@ -960,13 +966,14 @@ fn initSynchronisation(device: c.VkDevice) !SynchronisationObjects {
     }
 
     var rfs_created: usize = 0;
-    var render_finished_semaphores = [_]c.VkSemaphore{undefined} ** frames_in_flight;
+    var render_finished_semaphores = try allocator.alloc(c.VkSemaphore, swapchain_image_count);
     errdefer {
         for (render_finished_semaphores[0..rfs_created]) |render_finished_semaphore| {
             c.vkDestroySemaphore(device, render_finished_semaphore, null);
         }
+        allocator.free(render_finished_semaphores);
     }
-    for (&render_finished_semaphores) |*render_finished_semaphore| {
+    for (render_finished_semaphores) |*render_finished_semaphore| {
         try wrapVulkanResult(
             c.vkCreateSemaphore(device, &semaphore_create_info, null, render_finished_semaphore),
             "failed to create semaphore",
@@ -1095,7 +1102,7 @@ pub fn drawFrame(self: *Self) !void {
         .commandBufferCount = 1,
         .pCommandBuffers = &self.command_buffers[self.current_frame],
         .signalSemaphoreCount = 1,
-        .pSignalSemaphores = &self.render_finished_semaphores[self.current_frame],
+        .pSignalSemaphores = &self.render_finished_semaphores[image_index],
     };
     try wrapVulkanResult(
         c.vkQueueSubmit(
@@ -1110,7 +1117,7 @@ pub fn drawFrame(self: *Self) !void {
     const present_info = c.VkPresentInfoKHR{
         .sType = c.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &self.render_finished_semaphores[self.current_frame],
+        .pWaitSemaphores = &self.render_finished_semaphores[image_index],
         .swapchainCount = 1,
         .pSwapchains = &self.swapchain,
         .pImageIndices = &image_index,
