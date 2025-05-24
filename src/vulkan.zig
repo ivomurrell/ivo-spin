@@ -1179,10 +1179,10 @@ pub const Buffer = struct {
         c.vkGetBufferMemoryRequirements(device, buffer, &mem_reqs);
         const memory_type_index =
             findMemoryTypeIndex(
-            mem_reqs.memoryTypeBits,
-            required_prop_flags,
-            physical_device,
-        ) orelse return error.VulkanInitFailed;
+                mem_reqs.memoryTypeBits,
+                required_prop_flags,
+                physical_device,
+            ) orelse return error.VulkanInitFailed;
 
         const allocate_info = c.VkMemoryAllocateInfo{
             .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
