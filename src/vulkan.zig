@@ -946,6 +946,11 @@ fn initSynchronisation(device: c.VkDevice) !SynchronisationObjects {
 
     var ias_created: usize = 0;
     var image_available_semaphores = [_]c.VkSemaphore{undefined} ** frames_in_flight;
+    errdefer {
+        for (image_available_semaphores[0..ias_created]) |image_available_semaphore| {
+            c.vkDestroySemaphore(device, image_available_semaphore, null);
+        }
+    }
     for (&image_available_semaphores) |*image_available_semaphore| {
         try wrapVulkanResult(
             c.vkCreateSemaphore(device, &semaphore_create_info, null, image_available_semaphore),
@@ -953,14 +958,14 @@ fn initSynchronisation(device: c.VkDevice) !SynchronisationObjects {
         );
         ias_created += 1;
     }
-    errdefer {
-        for (image_available_semaphores[0..ias_created]) |image_available_semaphore| {
-            c.vkDestroySemaphore(device, image_available_semaphore, null);
-        }
-    }
 
     var rfs_created: usize = 0;
     var render_finished_semaphores = [_]c.VkSemaphore{undefined} ** frames_in_flight;
+    errdefer {
+        for (render_finished_semaphores[0..rfs_created]) |render_finished_semaphore| {
+            c.vkDestroySemaphore(device, render_finished_semaphore, null);
+        }
+    }
     for (&render_finished_semaphores) |*render_finished_semaphore| {
         try wrapVulkanResult(
             c.vkCreateSemaphore(device, &semaphore_create_info, null, render_finished_semaphore),
@@ -968,25 +973,20 @@ fn initSynchronisation(device: c.VkDevice) !SynchronisationObjects {
         );
         rfs_created += 1;
     }
-    errdefer {
-        for (render_finished_semaphores[0..rfs_created]) |render_finished_semaphore| {
-            c.vkDestroySemaphore(device, render_finished_semaphore, null);
-        }
-    }
 
     var iff_created: usize = 0;
     var in_flight_fences = [_]c.VkFence{undefined} ** frames_in_flight;
+    errdefer {
+        for (in_flight_fences[0..iff_created]) |in_flight_fence| {
+            c.vkDestroyFence(device, in_flight_fence, null);
+        }
+    }
     for (&in_flight_fences) |*in_flight_fence| {
         try wrapVulkanResult(
             c.vkCreateFence(device, &fence_create_info, null, in_flight_fence),
             "failed to create fence",
         );
         iff_created += 1;
-    }
-    errdefer {
-        for (in_flight_fences[0..iff_created]) |in_flight_fence| {
-            c.vkDestroyFence(device, in_flight_fence, null);
-        }
     }
 
     return .{
