@@ -54,9 +54,6 @@ pub fn build(b: *std.Build) !void {
             // the vulkan utility headers aren't declared in a pkg-config file so
             // we need to add the brew include path
             exe_step.addIncludePath(std.Build.LazyPath{ .cwd_relative = "/opt/homebrew/include" });
-            // the vulkan loader can't find the validation layer unless we add its
-            // path to the search paths here
-            exe_step.addLibraryPath(std.Build.LazyPath{ .cwd_relative = "/opt/homebrew/lib" });
         }
         exe_step.linkSystemLibrary("vulkan");
         for (shader_outputs.items) |shader_output| {
