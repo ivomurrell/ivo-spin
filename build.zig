@@ -51,8 +51,12 @@ pub fn build(b: *std.Build) !void {
         });
         exe_step.linkSystemLibrary("sdl3");
         if (target.query.isNative() and target.result.os.tag == .macos) {
-            // the vulkan utility headers aren't declared in a pkg-config file so
-            // we need to add the brew include path
+            // the vulkan utility headers aren't declared in a pkg-config file
+            // so we should add them explicitly as homebrew installs them to a
+            // non-standard path. note that this isn't technically necessary
+            // because sdl already adds the directory in its pkg-config but we
+            // don't want to introduce an implicit dependency between the two
+            // packages.
             exe_step.addIncludePath(std.Build.LazyPath{ .cwd_relative = "/opt/homebrew/include" });
         }
         exe_step.linkSystemLibrary("vulkan");
