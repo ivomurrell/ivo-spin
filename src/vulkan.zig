@@ -5,11 +5,32 @@ const c = @import("c.zig");
 const mat = @import("matrix.zig");
 const SDL = @import("sdl.zig");
 
+const Image = @import("vulkan/image.zig").Image;
+const StagedBuffer = @import("vulkan/staged_buffer.zig").StagedBuffer;
+const Vertex = @import("vulkan/Vertex.zig");
+const UniformBuffer = @import("vulkan/uniform_buffer.zig").UniformBuffer;
+const util = @import("vulkan/util.zig");
+
 const Allocator = std.mem.Allocator;
 
 const Self = @This();
 
 const frames_in_flight = 2;
+
+const VertexBuffer = StagedBuffer(Vertex, c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+const IndexBuffer = StagedBuffer(u16, c.VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+const UniformBufferObject = extern struct {
+    model: mat.Mat4,
+    view: mat.Mat4,
+    projection: mat.Mat4,
+};
+const UBOBuffer = UniformBuffer(UniformBufferObject);
+const DepthImage = Image(
+    c.VK_FORMAT_D32_SFLOAT_S8_UINT,
+    c.VK_IMAGE_TILING_OPTIMAL,
+    c.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+    c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+);
 
 allocator: Allocator,
 timer: std.time.Timer,
@@ -223,7 +244,7 @@ pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
 }
 
 pub fn deinit(self: Self) void {
-    wrapVulkanResult(
+    util.wrapVulkanResult(
         c.vkDeviceWaitIdle(self.device),
         "couldn't wait for device to be finished",
     ) catch {};
@@ -266,16 +287,6 @@ pub fn deinit(self: Self) void {
     c.vkDestroyInstance(self.instance, null);
 }
 
-fn wrapVulkanResult(
-    result: c.VkResult,
-    comptime message: []const u8,
-) error{VulkanInitFailed}!void {
-    if (result != c.VK_SUCCESS) {
-        std.log.err(message ++ ": {s}", .{c.string_VkResult(result)});
-        return error.VulkanInitFailed;
-    }
-}
-
 fn initInstance(allocator: Allocator) !c.VkInstance {
     const sdl_extensions = SDL.extensions();
     const portability_extensions = [_][*:0]const u8{
@@ -306,7 +317,7 @@ fn initInstance(allocator: Allocator) !c.VkInstance {
     }
 
     var instance: c.VkInstance = undefined;
-    try wrapVulkanResult(
+    try util.wrapVulkanResult(
         c.vkCreateInstance(&create_info, null, &instance),
         "vulkan instance failed to initialise",
     );
@@ -317,7 +328,7 @@ fn initInstance(allocator: Allocator) !c.VkInstance {
 fn initPhysicalDevice(instance: c.VkInstance) !c.VkPhysicalDevice {
     var physical_device_count: u32 = 1;
     var physical_device: c.VkPhysicalDevice = undefined;
-    try wrapVulkanResult(
+    try util.wrapVulkanResult(
         c.vkEnumeratePhysicalDevices(instance, &physical_device_count, &physical_device),
         "failed to find vulkan device",
     );
@@ -420,7 +431,7 @@ fn initDevice(
         .ppEnabledExtensionNames = &device_extensions,
     };
     var device: c.VkDevice = undefined;
-    try wrapVulkanResult(
+    try util.wrapVulkanResult(
         c.vkCreateDevice(physical_device, &create_info, null, &device),
         "failed to create logical device",
     );
@@ -442,7 +453,7 @@ fn initSwapchain(
     queue_family_indices: QueueFamilyIndices,
 ) !Swapchain {
     var surface_capabilities: c.VkSurfaceCapabilitiesKHR = undefined;
-    try wrapVulkanResult(c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+    try util.wrapVulkanResult(c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
         physical_device,
         surface,
         &surface_capabilities,
@@ -480,19 +491,19 @@ fn initSwapchain(
     }
 
     var swapchain: c.VkSwapchainKHR = undefined;
-    try wrapVulkanResult(
+    try util.wrapVulkanResult(
         c.vkCreateSwapchainKHR(device, &create_info, null, &swapchain),
         "failed to create swapchain",
     );
 
     var swapchain_image_count: u32 = undefined;
-    try wrapVulkanResult(
+    try util.wrapVulkanResult(
         c.vkGetSwapchainImagesKHR(device, swapchain, &swapchain_image_count, null),
         "failed to get number of swapchain images",
     );
     const swapchain_images = try allocator.alloc(c.VkImage, swapchain_image_count);
     errdefer allocator.free(swapchain_images);
-    try wrapVulkanResult(c.vkGetSwapchainImagesKHR(
+    try util.wrapVulkanResult(c.vkGetSwapchainImagesKHR(
         device,
         swapchain,
         &swapchain_image_count,
@@ -554,7 +565,7 @@ fn initImageView(
         },
     };
     var image_view: c.VkImageView = undefined;
-    try wrapVulkanResult(
+    try util.wrapVulkanResult(
         c.vkCreateImageView(device, &create_info, null, &image_view),
         "failed to create an image view",
     );
@@ -657,7 +668,7 @@ fn initRenderPass(
         .pDependencies = &subpass_dependency,
     };
     var render_pass: c.VkRenderPass = undefined;
-    try wrapVulkanResult(
+    try util.wrapVulkanResult(
         c.vkCreateRenderPass(device, &create_info, null, &render_pass),
         "failed to create render pass",
     );
@@ -674,7 +685,7 @@ fn initPipelineLayout(
         .pSetLayouts = &descriptor_set_layout,
     };
     var pipeline_layout: c.VkPipelineLayout = undefined;
-    try wrapVulkanResult(c.vkCreatePipelineLayout(
+    try util.wrapVulkanResult(c.vkCreatePipelineLayout(
         device,
         &create_info,
         null,
@@ -697,7 +708,7 @@ fn initDescriptorSetLayout(device: c.VkDevice) !c.VkDescriptorSetLayout {
         .pBindings = &ubo_layout_binding,
     };
     var descriptor_set_layout: c.VkDescriptorSetLayout = undefined;
-    try wrapVulkanResult(
+    try util.wrapVulkanResult(
         c.vkCreateDescriptorSetLayout(device, &create_info, null, &descriptor_set_layout),
         "failed to create descriptor set layout",
     );
@@ -817,7 +828,7 @@ fn initGraphicsPipeline(
         .subpass = 0,
     };
     var graphics_pipeline: c.VkPipeline = undefined;
-    try wrapVulkanResult(c.vkCreateGraphicsPipelines(
+    try util.wrapVulkanResult(c.vkCreateGraphicsPipelines(
         device,
         null,
         1,
@@ -835,7 +846,7 @@ fn create_shader_module(device: c.VkDevice, bytecode: []align(4) const u8) !c.Vk
         .pCode = @ptrCast(bytecode.ptr),
     };
     var shader_module: c.VkShaderModule = undefined;
-    try wrapVulkanResult(
+    try util.wrapVulkanResult(
         c.vkCreateShaderModule(device, &create_info, null, &shader_module),
         "failed to create shader module",
     );
@@ -867,7 +878,7 @@ fn initFramebuffers(
             .height = image_extent.height,
             .layers = 1,
         };
-        try wrapVulkanResult(
+        try util.wrapVulkanResult(
             c.vkCreateFramebuffer(device, &create_info, null, framebuffer),
             "failed to create framebuffer",
         );
@@ -884,7 +895,7 @@ fn initCommandPool(device: c.VkDevice, queue_family_indices: QueueFamilyIndices)
         .queueFamilyIndex = queue_family_indices.graphics_family,
     };
     var command_pool: c.VkCommandPool = undefined;
-    try wrapVulkanResult(
+    try util.wrapVulkanResult(
         c.vkCreateCommandPool(device, &create_info, null, &command_pool),
         "failed to create command pool",
     );
@@ -971,7 +982,7 @@ fn initDescriptorPool(device: c.VkDevice) !c.VkDescriptorPool {
         .maxSets = frames_in_flight,
     };
     var descriptor_pool: c.VkDescriptorPool = undefined;
-    try wrapVulkanResult(
+    try util.wrapVulkanResult(
         c.vkCreateDescriptorPool(device, &create_info, null, &descriptor_pool),
         "Failed to create descriptor pool",
     );
@@ -991,7 +1002,7 @@ fn initDescriptorSets(
         .pSetLayouts = &[_]c.VkDescriptorSetLayout{descriptor_set_layout} ** frames_in_flight,
     };
     var descriptor_sets = [_]c.VkDescriptorSet{undefined} ** frames_in_flight;
-    try wrapVulkanResult(
+    try util.wrapVulkanResult(
         c.vkAllocateDescriptorSets(device, &allocate_info, &descriptor_sets),
         "failed to allocate descriptor sets",
     );
@@ -1028,7 +1039,7 @@ fn initCommandBuffers(
         .commandBufferCount = frames_in_flight,
     };
     var command_buffers = [_]c.VkCommandBuffer{undefined} ** frames_in_flight;
-    try wrapVulkanResult(
+    try util.wrapVulkanResult(
         c.vkAllocateCommandBuffers(device, &allocate_info, &command_buffers),
         "failed to allocate command buffer",
     );
@@ -1062,7 +1073,7 @@ fn initSynchronisation(
         }
     }
     for (&image_available_semaphores) |*image_available_semaphore| {
-        try wrapVulkanResult(
+        try util.wrapVulkanResult(
             c.vkCreateSemaphore(device, &semaphore_create_info, null, image_available_semaphore),
             "failed to create semaphore",
         );
@@ -1078,7 +1089,7 @@ fn initSynchronisation(
         allocator.free(render_finished_semaphores);
     }
     for (render_finished_semaphores) |*render_finished_semaphore| {
-        try wrapVulkanResult(
+        try util.wrapVulkanResult(
             c.vkCreateSemaphore(device, &semaphore_create_info, null, render_finished_semaphore),
             "failed to create semaphore",
         );
@@ -1093,7 +1104,7 @@ fn initSynchronisation(
         }
     }
     for (&in_flight_fences) |*in_flight_fence| {
-        try wrapVulkanResult(
+        try util.wrapVulkanResult(
             c.vkCreateFence(device, &fence_create_info, null, in_flight_fence),
             "failed to create fence",
         );
@@ -1114,7 +1125,7 @@ fn recordCommandBuffer(self: *Self, framebuffer: c.VkFramebuffer) !void {
         .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .flags = 0,
     };
-    try wrapVulkanResult(
+    try util.wrapVulkanResult(
         c.vkBeginCommandBuffer(command_buffer, &begin_info),
         "failed to beging recording command buffer",
     );
@@ -1166,11 +1177,11 @@ fn recordCommandBuffer(self: *Self, framebuffer: c.VkFramebuffer) !void {
     c.vkCmdDrawIndexed(command_buffer, @intCast(self.index_buffer.data.len), 1, 0, 0, 0);
 
     c.vkCmdEndRenderPass(command_buffer);
-    try wrapVulkanResult(c.vkEndCommandBuffer(command_buffer), "failed to record command buffer");
+    try util.wrapVulkanResult(c.vkEndCommandBuffer(command_buffer), "failed to record command buffer");
 }
 
 pub fn drawFrame(self: *Self) !void {
-    try wrapVulkanResult(
+    try util.wrapVulkanResult(
         c.vkWaitForFences(
             self.device,
             1,
@@ -1180,7 +1191,7 @@ pub fn drawFrame(self: *Self) !void {
         ),
         "failed to wait for in-flight fence",
     );
-    try wrapVulkanResult(
+    try util.wrapVulkanResult(
         c.vkResetFences(self.device, 1, &self.in_flight_fences[self.current_frame]),
         "failed to reset in-flight fence",
     );
@@ -1197,7 +1208,7 @@ pub fn drawFrame(self: *Self) !void {
 
     self.updateUniformBuffer();
 
-    try wrapVulkanResult(
+    try util.wrapVulkanResult(
         c.vkResetCommandBuffer(self.command_buffers[self.current_frame], 0),
         "failed to reset command buffer",
     );
@@ -1213,7 +1224,7 @@ pub fn drawFrame(self: *Self) !void {
         .signalSemaphoreCount = 1,
         .pSignalSemaphores = &self.render_finished_semaphores[image_index],
     };
-    try wrapVulkanResult(
+    try util.wrapVulkanResult(
         c.vkQueueSubmit(
             self.graphics_queue,
             1,
@@ -1236,278 +1247,6 @@ pub fn drawFrame(self: *Self) !void {
     self.current_frame = (self.current_frame + 1) % frames_in_flight;
 }
 
-pub const Vertex = struct {
-    position: @Vector(3, f32),
-    colour: @Vector(3, f32),
-
-    pub fn bindingDescription() c.VkVertexInputBindingDescription {
-        return .{
-            .binding = 0,
-            .stride = @sizeOf(Vertex),
-            .inputRate = c.VK_VERTEX_INPUT_RATE_VERTEX,
-        };
-    }
-
-    pub fn attributeDescriptions() [2]c.VkVertexInputAttributeDescription {
-        return [_]c.VkVertexInputAttributeDescription{
-            .{
-                .binding = 0,
-                .location = 0,
-                .format = c.VK_FORMAT_R32G32B32_SFLOAT,
-                .offset = @offsetOf(Vertex, "position"),
-            },
-            .{
-                .binding = 0,
-                .location = 1,
-                .format = c.VK_FORMAT_R32G32B32_SFLOAT,
-                .offset = @offsetOf(Vertex, "colour"),
-            },
-        };
-    }
-};
-
-pub const Buffer = struct {
-    device: c.VkDevice,
-    handle: c.VkBuffer,
-    memory: c.VkDeviceMemory,
-
-    pub fn init(
-        device: c.VkDevice,
-        physical_device: c.VkPhysicalDevice,
-        buffer_size: u64,
-        usage_flags: u32,
-        required_prop_flags: u32,
-    ) !Buffer {
-        const buffer_create_info = c.VkBufferCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .size = buffer_size,
-            .usage = usage_flags,
-            .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
-        };
-        var buffer: c.VkBuffer = undefined;
-        try wrapVulkanResult(
-            c.vkCreateBuffer(device, &buffer_create_info, null, &buffer),
-            "failed to create vertex buffer",
-        );
-        errdefer c.vkDestroyBuffer(device, buffer, null);
-
-        var mem_reqs: c.VkMemoryRequirements = undefined;
-        c.vkGetBufferMemoryRequirements(device, buffer, &mem_reqs);
-        const memory_type_index =
-            findMemoryTypeIndex(
-                mem_reqs.memoryTypeBits,
-                required_prop_flags,
-                physical_device,
-            ) orelse return error.VulkanInitFailed;
-
-        const allocate_info = c.VkMemoryAllocateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-            .allocationSize = mem_reqs.size,
-            .memoryTypeIndex = memory_type_index,
-        };
-        var buffer_memory: c.VkDeviceMemory = undefined;
-        try wrapVulkanResult(
-            c.vkAllocateMemory(device, &allocate_info, null, &buffer_memory),
-            "failed to allocate vertex buffer memory",
-        );
-        errdefer c.vkFreeMemory(device, buffer_memory, null);
-
-        try wrapVulkanResult(
-            c.vkBindBufferMemory(device, buffer, buffer_memory, 0),
-            "failed to bind vertx buffer memory",
-        );
-
-        return Buffer{
-            .device = device,
-            .handle = buffer,
-            .memory = buffer_memory,
-        };
-    }
-
-    pub fn deinit(self: Buffer) void {
-        c.vkDestroyBuffer(self.device, self.handle, null);
-        c.vkFreeMemory(self.device, self.memory, null);
-    }
-
-    fn findMemoryTypeIndex(
-        required_bits: u32,
-        required_prop_flags: u32,
-        physical_device: c.VkPhysicalDevice,
-    ) ?u32 {
-        var memory_props: c.VkPhysicalDeviceMemoryProperties = undefined;
-        c.vkGetPhysicalDeviceMemoryProperties(physical_device, &memory_props);
-
-        for (
-            memory_props.memoryTypes[0..memory_props.memoryTypeCount],
-            0..,
-        ) |memory_type, memory_type_index| {
-            if ((required_bits & (@as(u32, 1) << @as(u5, @intCast(memory_type_index))) > 0) and
-                ((memory_type.propertyFlags & required_prop_flags) == required_prop_flags))
-            {
-                return @intCast(memory_type_index);
-            }
-        }
-        return null;
-    }
-};
-
-fn StagedBuffer(comptime T: type, buffer_type: u32) type {
-    return struct {
-        const SelfBuffer = @This();
-        data: []const T,
-        handle: Buffer,
-
-        pub fn init(
-            data: []const T,
-            device: c.VkDevice,
-            physical_device: c.VkPhysicalDevice,
-            command_pool: c.VkCommandPool,
-            graphics_queue: c.VkQueue,
-        ) !SelfBuffer {
-            const buffer_size = @sizeOf(T) * data.len;
-
-            const staging_buffer = try Buffer.init(
-                device,
-                physical_device,
-                buffer_size,
-                c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-            );
-            defer staging_buffer.deinit();
-
-            var mapped_data: [*]T = undefined;
-            try wrapVulkanResult(
-                c.vkMapMemory(
-                    device,
-                    staging_buffer.memory,
-                    0,
-                    buffer_size,
-                    0,
-                    @ptrCast(&mapped_data),
-                ),
-                "failed to map vertex buffer memory",
-            );
-            @memcpy(mapped_data, data);
-            c.vkUnmapMemory(device, staging_buffer.memory);
-
-            const data_buffer = try Buffer.init(
-                device,
-                physical_device,
-                buffer_size,
-                c.VK_IMAGE_USAGE_TRANSFER_DST_BIT | buffer_type,
-                c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-            );
-            errdefer data_buffer.deinit();
-
-            const allocate_info = c.VkCommandBufferAllocateInfo{
-                .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-                .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-                .commandPool = command_pool,
-                .commandBufferCount = 1,
-            };
-
-            var command_buffer: c.VkCommandBuffer = undefined;
-            try wrapVulkanResult(
-                c.vkAllocateCommandBuffers(device, &allocate_info, &command_buffer),
-                "failed to allocate copying command buffer",
-            );
-            defer c.vkFreeCommandBuffers(device, command_pool, 1, &command_buffer);
-
-            const begin_info = c.VkCommandBufferBeginInfo{
-                .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                .flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-            };
-            try wrapVulkanResult(
-                c.vkBeginCommandBuffer(command_buffer, &begin_info),
-                "failed to begin recording copying command buffer",
-            );
-
-            const copy_region = c.VkBufferCopy{
-                .size = buffer_size,
-            };
-            c.vkCmdCopyBuffer(
-                command_buffer,
-                staging_buffer.handle,
-                data_buffer.handle,
-                1,
-                &copy_region,
-            );
-
-            try wrapVulkanResult(
-                c.vkEndCommandBuffer(command_buffer),
-                "failed to end recording copying command buffer",
-            );
-
-            const submit_info = c.VkSubmitInfo{
-                .sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                .commandBufferCount = 1,
-                .pCommandBuffers = &command_buffer,
-            };
-            try wrapVulkanResult(
-                c.vkQueueSubmit(graphics_queue, 1, &submit_info, null),
-                "failed to submit copying command to queue",
-            );
-            try wrapVulkanResult(
-                c.vkQueueWaitIdle(graphics_queue),
-                "failed to wait for queue to complete",
-            );
-
-            return SelfBuffer{
-                .data = data,
-                .handle = data_buffer,
-            };
-        }
-
-        pub fn deinit(self: SelfBuffer) void {
-            self.handle.deinit();
-        }
-    };
-}
-
-pub const VertexBuffer = StagedBuffer(Vertex, c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-pub const IndexBuffer = StagedBuffer(u16, c.VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-
-fn UniformBuffer(comptime T: type) type {
-    return struct {
-        const SelfBuffer = @This();
-        handle: Buffer,
-        mapped_memory: *T,
-
-        pub fn init(device: c.VkDevice, physical_device: c.VkPhysicalDevice) !SelfBuffer {
-            const buffer_size = @sizeOf(T);
-            const buffer = try Buffer.init(
-                device,
-                physical_device,
-                buffer_size,
-                c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-            );
-            errdefer buffer.deinit();
-
-            var mapped_memory: *T = undefined;
-            try wrapVulkanResult(
-                c.vkMapMemory(device, buffer.memory, 0, buffer_size, 0, @ptrCast(&mapped_memory)),
-                "failed to map uniform buffer memory",
-            );
-
-            return SelfBuffer{
-                .handle = buffer,
-                .mapped_memory = mapped_memory,
-            };
-        }
-
-        pub fn deinit(self: SelfBuffer) void {
-            self.handle.deinit();
-        }
-    };
-}
-pub const UniformBufferObject = extern struct {
-    model: mat.Mat4,
-    view: mat.Mat4,
-    projection: mat.Mat4,
-};
-pub const UBOBuffer = UniformBuffer(UniformBufferObject);
-
 fn updateUniformBuffer(self: *Self) void {
     const time = self.timer.read();
     const time_s = @as(f32, @floatFromInt(time)) / 1_000_000_000;
@@ -1521,91 +1260,3 @@ fn updateUniformBuffer(self: *Self) void {
         .projection = mat.Mat4.perspective(std.math.degreesToRadians(45), aspect_ratio, 0.1, 10),
     };
 }
-
-fn Image(
-    format: c.VkFormat,
-    tiling: c.VkImageTiling,
-    usage: c.VkImageUsageFlags,
-    mem_properties: c.VkMemoryPropertyFlags,
-) type {
-    return struct {
-        const SelfImage = @This();
-        device: c.VkDevice,
-        handle: c.VkImage,
-        memory: c.VkDeviceMemory,
-        format: c.VkFormat,
-
-        pub fn init(
-            device: c.VkDevice,
-            physical_device: c.VkPhysicalDevice,
-            width: u32,
-            height: u32,
-        ) !SelfImage {
-            const image_create_info = c.VkImageCreateInfo{
-                .sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-                .imageType = c.VK_IMAGE_TYPE_2D,
-                .format = format,
-                .extent = c.VkExtent3D{
-                    .width = width,
-                    .height = height,
-                    .depth = 1,
-                },
-                .mipLevels = 1,
-                .arrayLayers = 1,
-                .tiling = tiling,
-                .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
-                .usage = usage,
-                .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
-                .samples = c.VK_SAMPLE_COUNT_1_BIT,
-            };
-            var image: c.VkImage = undefined;
-            try wrapVulkanResult(
-                c.vkCreateImage(device, &image_create_info, null, &image),
-                "failed to create image",
-            );
-            errdefer c.vkDestroyImage(device, image, null);
-
-            var mem_reqs: c.VkMemoryRequirements = undefined;
-            c.vkGetImageMemoryRequirements(device, image, &mem_reqs);
-            const memory_type_index = Buffer.findMemoryTypeIndex(
-                mem_reqs.memoryTypeBits,
-                mem_properties,
-                physical_device,
-            ) orelse return error.VulkanInitFailed;
-            const allocate_info = c.VkMemoryAllocateInfo{
-                .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-                .allocationSize = mem_reqs.size,
-                .memoryTypeIndex = memory_type_index,
-            };
-            var image_memory: c.VkDeviceMemory = undefined;
-            try wrapVulkanResult(
-                c.vkAllocateMemory(device, &allocate_info, null, &image_memory),
-                "failed to allocate image memory",
-            );
-            errdefer c.vkFreeMemory(device, image_memory, null);
-            try wrapVulkanResult(
-                c.vkBindImageMemory(device, image, image_memory, 0),
-                "failed to bind image memory",
-            );
-
-            return SelfImage{
-                .device = device,
-                .handle = image,
-                .memory = image_memory,
-                .format = format,
-            };
-        }
-
-        pub fn deinit(self: SelfImage) void {
-            c.vkDestroyImage(self.device, self.handle, null);
-            c.vkFreeMemory(self.device, self.memory, null);
-        }
-    };
-}
-
-pub const DepthImage = Image(
-    c.VK_FORMAT_D32_SFLOAT_S8_UINT,
-    c.VK_IMAGE_TILING_OPTIMAL,
-    c.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-    c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-);
