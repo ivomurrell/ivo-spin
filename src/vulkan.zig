@@ -5,6 +5,7 @@ const c = @import("c.zig");
 const mat = @import("matrix.zig");
 const SDL = @import("sdl.zig");
 
+const Gltf = @import("Gltf.zig");
 const Image = @import("vulkan/image.zig").Image;
 const StagedBuffer = @import("vulkan/staged_buffer.zig").StagedBuffer;
 const Vertex = @import("vulkan/Vertex.zig");
@@ -18,7 +19,7 @@ const Self = @This();
 const frames_in_flight = 2;
 
 const VertexBuffer = StagedBuffer(Vertex, c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-const IndexBuffer = StagedBuffer(u16, c.VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+const IndexBuffer = StagedBuffer(u32, c.VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
 const UniformBufferObject = extern struct {
     model: mat.Mat4,
     view: mat.Mat4,
@@ -52,6 +53,7 @@ pipeline_layout: c.VkPipelineLayout,
 graphics_pipeline: c.VkPipeline,
 framebuffers: []c.VkFramebuffer,
 command_pool: c.VkCommandPool,
+model: Gltf.Model,
 vertex_buffer: VertexBuffer,
 index_buffer: IndexBuffer,
 uniform_buffers: [frames_in_flight]UBOBuffer,
@@ -166,7 +168,11 @@ pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
     const command_pool = try initCommandPool(device, queue_family_indices);
     errdefer c.vkDestroyCommandPool(device, command_pool, null);
 
+    var model = try initModel(allocator);
+    errdefer model.deinit(allocator);
     const vertex_buffer = try initVertexBuffer(
+        allocator,
+        model,
         device,
         physical_device,
         command_pool,
@@ -174,6 +180,7 @@ pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
     );
     errdefer vertex_buffer.deinit();
     const index_buffer = try initIndexBuffer(
+        model,
         device,
         physical_device,
         command_pool,
@@ -231,6 +238,7 @@ pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
         .graphics_pipeline = graphics_pipeline,
         .framebuffers = framebuffers,
         .command_pool = command_pool,
+        .model = model,
         .vertex_buffer = vertex_buffer,
         .index_buffer = index_buffer,
         .uniform_buffers = uniform_buffers,
@@ -243,7 +251,7 @@ pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
     };
 }
 
-pub fn deinit(self: Self) void {
+pub fn deinit(self: *Self) void {
     util.wrapVulkanResult(
         c.vkDeviceWaitIdle(self.device),
         "couldn't wait for device to be finished",
@@ -265,6 +273,7 @@ pub fn deinit(self: Self) void {
     }
     self.index_buffer.deinit();
     self.vertex_buffer.deinit();
+    self.model.deinit(self.allocator);
     c.vkDestroyImageView(self.device, self.depth_resources.image_view, null);
     self.depth_resources.image.deinit();
     c.vkDestroyCommandPool(self.device, self.command_pool, null);
@@ -902,56 +911,43 @@ fn initCommandPool(device: c.VkDevice, queue_family_indices: QueueFamilyIndices)
     return command_pool;
 }
 
+fn initModel(allocator: Allocator) !Gltf.Model {
+    const gltf = try Gltf.parse(allocator, "data/practice_kart.glb");
+    defer gltf.deinit();
+    return gltf.loadModel();
+}
+
 fn initVertexBuffer(
+    allocator: Allocator,
+    model: Gltf.Model,
     device: c.VkDevice,
     physical_device: c.VkPhysicalDevice,
     command_pool: c.VkCommandPool,
     graphics_queue: c.VkQueue,
 ) !VertexBuffer {
-    const vertices = [_]Vertex{ .{
-        .position = [_]f32{ -0.5, -0.5, 0.5 },
-        .colour = [_]f32{ 1.0, 0.0, 0.0 },
-    }, .{
-        .position = [_]f32{ 0.5, -0.5, 0.5 },
-        .colour = [_]f32{ 0.0, 1.0, 0.0 },
-    }, .{
-        .position = [_]f32{ 0.5, 0.5, 0.5 },
-        .colour = [_]f32{ 0.0, 0.0, 1.0 },
-    }, .{
-        .position = [_]f32{ -0.5, 0.5, 0.5 },
-        .colour = [_]f32{ 1.0, 1.0, 1.0 },
-    }, .{
-        .position = [_]f32{ -0.5, -0.5, -0.5 },
-        .colour = [_]f32{ 1.0, 1.0, 0.0 },
-    }, .{
-        .position = [_]f32{ 0.5, -0.5, -0.5 },
-        .colour = [_]f32{ 0.0, 1.0, 1.0 },
-    }, .{
-        .position = [_]f32{ 0.5, 0.5, -0.5 },
-        .colour = [_]f32{ 1.0, 0.0, 1.0 },
-    }, .{
-        .position = [_]f32{ -0.5, 0.5, -0.5 },
-        .colour = [_]f32{ 0.5, 0.5, 1.0 },
-    } };
+    const vertexPositions = model.vertices.items;
+    const vertices = try allocator.alloc(Vertex, vertexPositions.len);
+    defer allocator.free(vertices);
+    var prng = std.Random.DefaultPrng.init(2374632942300834320);
+    const rand = prng.random();
+    for (vertices, 0..) |*vertex, i| {
+        vertex.* = .{
+            .position = vertexPositions[i],
+            .colour = .{ rand.float(f32), rand.float(f32), rand.float(f32) },
+        };
+    }
 
-    return VertexBuffer.init(&vertices, device, physical_device, command_pool, graphics_queue);
+    return VertexBuffer.init(vertices, device, physical_device, command_pool, graphics_queue);
 }
 
 fn initIndexBuffer(
+    model: Gltf.Model,
     device: c.VkDevice,
     physical_device: c.VkPhysicalDevice,
     command_pool: c.VkCommandPool,
     graphics_queue: c.VkQueue,
 ) !IndexBuffer {
-    const front_face = [_]u16{ 0, 1, 2, 2, 3, 0 };
-    const right_face = [_]u16{ 1, 5, 6, 6, 2, 1 };
-    const top_face = [_]u16{ 4, 5, 1, 1, 0, 4 };
-    const left_face = [_]u16{ 4, 0, 3, 3, 7, 4 };
-    const bottom_face = [_]u16{ 3, 2, 6, 6, 7, 3 };
-    const back_face = [_]u16{ 5, 4, 7, 7, 6, 5 };
-    const indices = front_face ++ right_face ++ top_face ++ left_face ++ bottom_face ++ back_face;
-
-    return IndexBuffer.init(&indices, device, physical_device, command_pool, graphics_queue);
+    return IndexBuffer.init(model.indices.items, device, physical_device, command_pool, graphics_queue);
 }
 
 fn initUniformBuffers(
@@ -1161,7 +1157,7 @@ fn recordCommandBuffer(self: *Self, framebuffer: c.VkFramebuffer) !void {
         command_buffer,
         self.index_buffer.handle.handle,
         0,
-        c.VK_INDEX_TYPE_UINT16,
+        c.VK_INDEX_TYPE_UINT32,
     );
     c.vkCmdBindDescriptorSets(
         command_buffer,
