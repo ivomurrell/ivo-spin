@@ -1,5 +1,6 @@
 const std = @import("std");
 const c = @import("c.zig");
+const Input = @import("Input.zig");
 const SDL = @import("sdl.zig");
 const Vulkan = @import("vulkan.zig");
 
@@ -14,13 +15,21 @@ pub fn main() !void {
     var vulkan = try Vulkan.init(allocator, &sdl);
     defer vulkan.deinit();
 
+    var input: Input = .init;
+
     el: while (true) {
         var event = c.SDL_Event{ .type = 0 };
         while (c.SDL_PollEvent(&event)) {
-            if (event.type == c.SDL_EVENT_QUIT) {
-                break :el;
+            switch (event.type) {
+                c.SDL_EVENT_QUIT => {
+                    break :el;
+                },
+                c.SDL_EVENT_KEY_UP, c.SDL_EVENT_KEY_DOWN => {
+                    input.updateInput(event.key);
+                },
+                else => {},
             }
         }
-        try vulkan.drawFrame();
+        try vulkan.drawFrame(input);
     }
 }

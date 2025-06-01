@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const c = @import("c.zig");
+const Input = @import("Input.zig");
 const mat = @import("matrix.zig");
 const SDL = @import("sdl.zig");
 
@@ -63,6 +64,7 @@ command_buffers: [frames_in_flight]c.VkCommandBuffer,
 image_available_semaphores: [frames_in_flight]c.VkSemaphore,
 render_finished_semaphores: []c.VkSemaphore,
 in_flight_fences: [frames_in_flight]c.VkFence,
+camera_state: CameraState,
 
 pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
     const timer = try std.time.Timer.start();
@@ -248,6 +250,7 @@ pub fn init(allocator: Allocator, sdl: *const SDL) !Self {
         .image_available_semaphores = synchronisation_objects.image_available_semaphores,
         .render_finished_semaphores = synchronisation_objects.render_finished_semaphores,
         .in_flight_fences = synchronisation_objects.in_flight_fences,
+        .camera_state = .init,
     };
 }
 
@@ -1176,7 +1179,7 @@ fn recordCommandBuffer(self: *Self, framebuffer: c.VkFramebuffer) !void {
     try util.wrapVulkanResult(c.vkEndCommandBuffer(command_buffer), "failed to record command buffer");
 }
 
-pub fn drawFrame(self: *Self) !void {
+pub fn drawFrame(self: *Self, input: Input) !void {
     try util.wrapVulkanResult(
         c.vkWaitForFences(
             self.device,
@@ -1202,7 +1205,7 @@ pub fn drawFrame(self: *Self) !void {
         &image_index,
     );
 
-    self.updateUniformBuffer();
+    self.updateUniformBuffer(input);
 
     try util.wrapVulkanResult(
         c.vkResetCommandBuffer(self.command_buffers[self.current_frame], 0),
@@ -1243,15 +1246,29 @@ pub fn drawFrame(self: *Self) !void {
     self.current_frame = (self.current_frame + 1) % frames_in_flight;
 }
 
-fn updateUniformBuffer(self: *Self) void {
+const CameraState = struct {
+    prev_time: u64,
+    x: f32,
+    y: f32,
+
+    pub const init: CameraState = .{ .prev_time = 0, .x = 0, .y = 0 };
+};
+
+fn updateUniformBuffer(self: *Self, input: Input) void {
+    var camera_state = &self.camera_state;
     const time = self.timer.read();
-    const time_s = @as(f32, @floatFromInt(time)) / 1_000_000_000;
-    const angle = std.math.degreesToRadians(time_s * 20);
+    const delta = time - camera_state.prev_time;
+    camera_state.prev_time = time;
+    const delta_s = @as(f32, @floatFromInt(delta)) / 1_000_000_000;
+    const angle = std.math.degreesToRadians(delta_s * 60);
     const aspect_ratio = @as(f32, @floatFromInt(self.swapchain_extent.width)) /
         @as(f32, @floatFromInt(self.swapchain_extent.height));
 
+    camera_state.x += if (input.isUp()) angle else if (input.isDown()) -angle else 0;
+    camera_state.y += if (input.isLeft()) angle else if (input.isRight()) -angle else 0;
+
     self.uniform_buffers[self.current_frame].mapped_memory.* = UniformBufferObject{
-        .model = mat.Mat4.rotate(angle, angle, angle),
+        .model = mat.Mat4.rotate(camera_state.x, camera_state.y, 0),
         .view = mat.Mat4.lookAt(.{ 0, 0, -2.5 }, .{ 0, 0, 0 }, .{ 0, -1, 0 }),
         .projection = mat.Mat4.perspective(std.math.degreesToRadians(45), aspect_ratio, 0.1, 10),
     };
