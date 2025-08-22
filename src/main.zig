@@ -1,5 +1,6 @@
 const std = @import("std");
-const c = @import("c.zig");
+const c = @import("c");
+
 const Input = @import("Input.zig");
 const SDL = @import("sdl.zig");
 const Vulkan = @import("vulkan.zig");

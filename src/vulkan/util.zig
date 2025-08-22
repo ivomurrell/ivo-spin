@@ -1,6 +1,5 @@
 const std = @import("std");
-
-const c = @import("../c.zig");
+const c = @import("c");
 
 pub fn wrapVulkanResult(
     result: c.VkResult,

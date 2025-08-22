@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const c = @import("c");
 
-const c = @import("c.zig");
 const Input = @import("Input.zig");
 const mat = @import("matrix.zig");
 const SDL = @import("sdl.zig");

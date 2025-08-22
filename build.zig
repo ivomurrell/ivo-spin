@@ -41,24 +41,37 @@ pub fn build(b: *std.Build) !void {
         }
     }
 
+    const translate_c = b.addTranslateC(.{
+        .root_source_file = b.path("src/c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    if (target.query.isNative() and target.result.os.tag == .macos) {
+        // the vulkan utility headers aren't declared in a pkg-config file
+        // so we should add them explicitly as homebrew installs them to a
+        // non-standard path. note that this isn't technically necessary
+        // because sdl already adds the directory in its pkg-config but we
+        // don't want to introduce an implicit dependency between the two
+        // packages.
+        translate_c.addIncludePath(std.Build.LazyPath{ .cwd_relative = "/opt/homebrew/include" });
+    }
+
+    const root_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{
+            .name = "c",
+            .module = translate_c.createModule(),
+        }},
+    });
     var exe_steps: [2]*std.Build.Step.Compile = @splat(undefined);
     for (&exe_steps) |*exe_step_ref| {
         const exe_step = b.addExecutable(.{
             .name = "ivo-spin",
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
+            .root_module = root_module,
         });
         exe_step.linkSystemLibrary("sdl3");
-        if (target.query.isNative() and target.result.os.tag == .macos) {
-            // the vulkan utility headers aren't declared in a pkg-config file
-            // so we should add them explicitly as homebrew installs them to a
-            // non-standard path. note that this isn't technically necessary
-            // because sdl already adds the directory in its pkg-config but we
-            // don't want to introduce an implicit dependency between the two
-            // packages.
-            exe_step.addIncludePath(std.Build.LazyPath{ .cwd_relative = "/opt/homebrew/include" });
-        }
         exe_step.linkSystemLibrary("vulkan");
         for (shader_outputs.items) |shader_output| {
             exe_step.root_module.addAnonymousImport(
@@ -100,11 +113,7 @@ pub fn build(b: *std.Build) !void {
 
     // Creates a step for unit testing. This only builds the test executable
     // but does not run it.
-    const exe_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
+    const exe_unit_tests = b.addTest(.{ .root_module = root_module });
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 

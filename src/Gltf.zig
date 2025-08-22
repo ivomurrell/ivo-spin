@@ -66,12 +66,10 @@ file: std.fs.File,
 pub fn parse(allocator: Allocator, path: []const u8) !Gltf {
     const file = try std.fs.cwd().openFile(path, .{});
     errdefer file.close();
+    var file_reader = file.reader(&.{});
 
     var header: [20]u8 = undefined;
-    const header_read = try file.readAll(&header);
-    if (header_read < header.len) {
-        return GltfError.FileTooShort;
-    }
+    try file_reader.interface.readSliceAll(&header);
     if (!std.mem.eql(u8, header[0..4], "glTF")) {
         return GltfError.InvalidFileFormat;
     }
@@ -84,11 +82,14 @@ pub fn parse(allocator: Allocator, path: []const u8) !Gltf {
 
     const json_len = std.mem.readInt(u32, header[12..16], Endian.little);
 
-    var json_reader = std.json.reader(allocator, std.io.limitedReader(
-        file.reader(),
-        json_len,
-    ));
+    var json_buffer: [4096]u8 = undefined;
+    var limited_reader = file_reader.interface.limited(
+        .limited(json_len),
+        &json_buffer,
+    );
+    var json_reader: std.json.Reader = .init(allocator, &limited_reader.interface);
     defer json_reader.deinit();
+
     const json = try (std.json.parseFromTokenSource(
         Json,
         allocator,
@@ -97,14 +98,10 @@ pub fn parse(allocator: Allocator, path: []const u8) !Gltf {
     ) catch GltfError.CorruptData);
     errdefer json.deinit();
 
-    const bin_buffer_offset = 20 + json_len;
     var bin_header: [8]u8 = undefined;
-    const bin_header_read = try file.readAll(&bin_header);
-    if (bin_header_read < bin_header.len) {
-        return GltfError.FileTooShort;
-    }
+    try file_reader.interface.readSliceAll(&bin_header);
     const bin_len = std.mem.readInt(u32, bin_header[0..4], Endian.little);
-    const actual_bin_len = try file.getEndPos() - try file.getPos();
+    const actual_bin_len = try file.getEndPos() - file_reader.logicalPos();
     if (bin_len != actual_bin_len) {
         return GltfError.CorruptData;
     }
@@ -115,7 +112,7 @@ pub fn parse(allocator: Allocator, path: []const u8) !Gltf {
     return .{
         .allocator = allocator,
         .json = json,
-        .bin_offset = @intCast(bin_buffer_offset + bin_header.len),
+        .bin_offset = @intCast(file_reader.logicalPos()),
         .file = file,
     };
 }
@@ -204,10 +201,11 @@ pub fn readFromAccessor(
     const accessor = json.accessors[index];
     const buffer_view = json.bufferViews[accessor.bufferView];
 
-    try self.file.seekTo(
+    var file_reader = self.file.reader(&.{});
+    try file_reader.seekTo(
         self.bin_offset + buffer_view.byteOffset + accessor.byteOffset,
     );
     const data = try buf.addManyAsSlice(self.allocator, accessor.count);
-    _ = try self.file.readAll(@ptrCast(data));
+    try file_reader.interface.readSliceAll(@ptrCast(data));
     return data;
 }

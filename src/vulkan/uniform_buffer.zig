@@ -1,4 +1,5 @@
-const c = @import("../c.zig");
+const c = @import("c");
+
 const mat = @import("../matrix.zig");
 
 const Buffer = @import("Buffer.zig");
